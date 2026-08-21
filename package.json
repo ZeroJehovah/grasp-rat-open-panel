@@ -1,0 +1,14 @@
+{
+  "name": "grasp-rat-open-panel-collector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Raw snapshot collector for the open Grasp Rat panel",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node test/snapshot-collector.test.js",
+    "collect:once": "node snapshot-collector.js --once"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
