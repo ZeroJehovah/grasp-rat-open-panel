@@ -1,0 +1,14 @@
+[Unit]
+Description=Grasp Rat Open Panel health and lag check
+Wants=network-online.target
+After=network-online.target postgresql.service grasp-rat-panel-api.service grasp-rat-projector.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
+EnvironmentFile=-/home/ubuntu/grasp-rat-open-panel/.env
+ExecStart=/usr/bin/env node commands/health-check.js
+NoNewPrivileges=true
+PrivateTmp=true
+

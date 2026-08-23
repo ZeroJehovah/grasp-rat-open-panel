@@ -49,9 +49,12 @@ lifecycle objects, with a successful base+delta rebuild check.
    the example addresses with the four configured local IPv4 bind addresses.
 2. Create a private `.env` containing `DATABASE_URL` and run `npm run migrate`.
 3. Build the SPA with `npm run frontend:build`.
-4. Install and enable the collector, projector, API and retention units in
-   `deploy/`. The Cloudflare example exposes only the local API; credentials
-   stay outside this repository.
+4. Install and enable the collector, projector, API, retention and health
+   units/timers in `deploy/`. The health timer checks collector freshness,
+   queue/disk pressure, egress availability, API status and database version
+   lag; a failed check is visible as a failed systemd unit and journald entry.
+   The Cloudflare example exposes only the local API; credentials stay outside
+   this repository.
 
 The panel API defaults to `127.0.0.1:19317`; this intentionally avoids the
 existing CPAMP management service on port `18317` on the deployment host.

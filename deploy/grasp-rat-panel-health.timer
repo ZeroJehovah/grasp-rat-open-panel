@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Grasp Rat Open Panel health and lag check
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=grasp-rat-panel-health.service
+
+[Install]
+WantedBy=timers.target
