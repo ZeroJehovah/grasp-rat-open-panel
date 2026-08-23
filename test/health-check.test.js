@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { evaluateHealth } = require('../commands/health-check');
+const { evaluateHealth, fetchJsonWithRetry } = require('../commands/health-check');
 
 const now = new Date('2026-08-23T00:00:00.000Z');
 const healthy = evaluateHealth({
@@ -38,4 +38,18 @@ const unhealthy = evaluateHealth({
 assert.strictEqual(unhealthy.ok, false);
 assert.deepStrictEqual(unhealthy.failures, ['collector_stale', 'queue_backlog', 'disk_low', 'collector_failures', 'database_stale', 'version_gap', 'api_unhealthy']);
 assert.deepStrictEqual(unhealthy.warnings, ['egress_group_unavailable', 'egress_probe_required', 'raw_retention_backlog']);
-console.log('health check tests passed');
+
+(async () => {
+  let attempts = 0;
+  const response = await fetchJsonWithRetry('http://127.0.0.1:19317/healthz', 5, 2, 0, async () => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' });
+    return { statusCode: 200, payload: { ok: true } };
+  });
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(attempts, 2);
+  console.log('health check tests passed');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

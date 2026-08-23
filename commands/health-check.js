@@ -12,6 +12,8 @@ const DEFAULT_MIN_DISK_FREE_BYTES = 5 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_QUEUE_DEPTH = 1_000;
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 2;
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
+const DEFAULT_API_RETRIES = 2;
+const DEFAULT_API_RETRY_DELAY_MS = 250;
 
 function numberOption(value, fallback) {
   const number = Number(value);
@@ -27,6 +29,8 @@ function parseArgs(argv) {
     maxQueueDepth: numberOption(process.env.GRASP_RAT_PANEL_HEALTH_MAX_QUEUE_DEPTH, DEFAULT_MAX_QUEUE_DEPTH),
     maxConsecutiveFailures: numberOption(process.env.GRASP_RAT_PANEL_HEALTH_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_CONSECUTIVE_FAILURES),
     httpTimeoutMs: numberOption(process.env.GRASP_RAT_PANEL_HEALTH_HTTP_TIMEOUT_MS, DEFAULT_HTTP_TIMEOUT_MS),
+    apiRetries: numberOption(process.env.GRASP_RAT_PANEL_HEALTH_API_RETRIES, DEFAULT_API_RETRIES),
+    apiRetryDelayMs: numberOption(process.env.GRASP_RAT_PANEL_HEALTH_API_RETRY_DELAY_MS, DEFAULT_API_RETRY_DELAY_MS),
     apiUrl: process.env.GRASP_RAT_PANEL_HEALTH_API_URL || 'http://127.0.0.1:19317/healthz'
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -40,6 +44,8 @@ function parseArgs(argv) {
     else if (arg === '--max-queue-depth') options.maxQueueDepth = Number(value());
     else if (arg === '--max-consecutive-failures') options.maxConsecutiveFailures = Number(value());
     else if (arg === '--http-timeout-ms') options.httpTimeoutMs = Number(value());
+    else if (arg === '--api-retries') options.apiRetries = Number(value());
+    else if (arg === '--api-retry-delay-ms') options.apiRetryDelayMs = Number(value());
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -48,6 +54,10 @@ function parseArgs(argv) {
     if (key !== 'now' && key !== 'apiUrl' && key !== 'help' && (!Number.isFinite(value) || value < 0)) throw new Error(`${key} must be a non-negative number`);
   }
   return options;
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function fetchJson(urlString, timeoutMs = DEFAULT_HTTP_TIMEOUT_MS) {
@@ -67,6 +77,22 @@ function fetchJson(urlString, timeoutMs = DEFAULT_HTTP_TIMEOUT_MS) {
     request.on('timeout', () => request.destroy(Object.assign(new Error('health request timeout'), { code: 'ETIMEDOUT' })));
     request.on('error', reject);
   });
+}
+
+async function fetchJsonWithRetry(urlString, timeoutMs, retries = DEFAULT_API_RETRIES, retryDelayMs = DEFAULT_API_RETRY_DELAY_MS, fetcher = fetchJson) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetcher(urlString, timeoutMs);
+      if (response.statusCode < 500 || attempt === retries) return response;
+      lastError = Object.assign(new Error(`health endpoint returned HTTP ${response.statusCode}`), { code: `HTTP_${response.statusCode}` });
+    } catch (error) {
+      lastError = error;
+      if (attempt === retries) throw error;
+    }
+    await wait(retryDelayMs);
+  }
+  throw lastError || new Error('health endpoint unavailable');
 }
 
 async function databaseHealth(connectionString, now = new Date()) {
@@ -140,7 +166,13 @@ async function runHealthCheck(options = parseArgs([]), dependencies = {}) {
   const database = await (dependencies.databaseHealth || databaseHealth)(process.env.DATABASE_URL, now);
   let api;
   try {
-    const response = await (dependencies.fetchJson || fetchJson)(options.apiUrl, options.httpTimeoutMs);
+    const response = await fetchJsonWithRetry(
+      options.apiUrl,
+      options.httpTimeoutMs,
+      options.apiRetries,
+      options.apiRetryDelayMs,
+      dependencies.fetchJson || fetchJson
+    );
     api = { ok: response.statusCode >= 200 && response.statusCode < 300 && response.payload?.ok === true, statusCode: response.statusCode };
   } catch (error) {
     api = { ok: false, errorCode: error.code || 'api_unavailable' };
@@ -165,4 +197,4 @@ if (require.main === module) {
   })();
 }
 
-module.exports = { databaseHealth, evaluateHealth, fetchJson, parseArgs, runHealthCheck };
+module.exports = { databaseHealth, evaluateHealth, fetchJson, fetchJsonWithRetry, parseArgs, runHealthCheck };
