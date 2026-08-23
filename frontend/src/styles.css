@@ -143,6 +143,7 @@ tbody tr:last-child td { border-bottom: 0; } tbody tr:hover { background: color-
 
 @media (max-width: 900px) {
   .app-shell { padding: 18px 18px 14px; }
+  .main-grid { order: 2; }
   .main-grid { grid-template-columns: 1fr; }
   .left-rail { display: contents; }
   .right-field { display: contents; }

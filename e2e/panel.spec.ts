@@ -13,24 +13,33 @@ async function mockApi(page: Page) {
   await page.route('**/api/v1/history*', route => route.fulfill({ json: { from: '2026-08-22', to: '2026-08-22', timezone: 'Asia/Shanghai', generatedAt: player.state.observedAt, closedThrough: null, players: [player], messages: [], kills: [], dailyQuota: [], stats: [] } }));
 }
 
-test('desktop panel keeps the three primary regions and data tabs', async ({ page }) => {
+function screenshotPath(testInfo: { project: { name: string }; title: string }): string {
+  const safeTitle = testInfo.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return `test-results/panel-${testInfo.project.name}-${safeTitle}.png`;
+}
+
+test('desktop panel keeps the three primary regions and data tabs', async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Grasp Rat Open Panel' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '实时地图' })).toBeVisible();
   await page.getByRole('button', { name: '玩家列表' }).click();
   await expect(page.getByText('fixture-player')).toBeVisible();
-  await page.screenshot({ path: 'test-results/panel-desktop.png', fullPage: true });
+  const topLevelOrder = await page.locator('.app-shell > *').evaluateAll(elements => elements.map(element => element.className));
+  expect(topLevelOrder.slice(0, 3)).toEqual(['banner', 'global-status', 'main-grid']);
+  await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
 });
 
-test('narrow panel keeps range, tabs and footer reachable', async ({ page }) => {
+test('narrow panel keeps range, tabs and footer reachable', async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '时间范围' })).toBeVisible();
   await page.getByRole('button', { name: '击杀明细' }).click();
   await expect(page.getByText('没有符合阈值的击杀记录')).toBeVisible();
   await expect(page.getByRole('link', { name: 'GitHub' })).toBeVisible();
-  await page.screenshot({ path: 'test-results/panel-narrow.png', fullPage: true });
+  const topLevelOrder = await page.locator('.app-shell > *').evaluateAll(elements => elements.map(element => element.className));
+  expect(topLevelOrder.slice(0, 3)).toEqual(['banner', 'global-status', 'main-grid']);
+  await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
 });
 
 test('historical range excludes realtime events from a later day', async ({ page }) => {
