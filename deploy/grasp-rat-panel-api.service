@@ -12,7 +12,7 @@ Environment=PANEL_HOST=127.0.0.1
 Environment=PANEL_PORT=19317
 Environment=PANEL_STATIC_DIR=/home/ubuntu/grasp-rat-open-panel/src/frontend/dist
 Environment=GRASP_RAT_PANEL_EGRESS_CONFIG=/home/ubuntu/grasp-rat-open-panel/src/deploy/egresses.json
-ExecStart=/usr/bin/env node api/index.js
+ExecStart=/opt/node-v20.19.5-linux-arm64/bin/node api/index.js
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
