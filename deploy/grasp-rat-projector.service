@@ -9,7 +9,7 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
 EnvironmentFile=/home/ubuntu/grasp-rat-open-panel/.env
 Environment=PANEL_MAP_METADATA_FILE=/home/ubuntu/grasp-rat-open-panel/data/map-metadata.json
-ExecStart=/usr/bin/env node commands/projector-worker.js
+ExecStart=/opt/node-v20.19.5-linux-arm64/bin/node commands/projector-worker.js
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

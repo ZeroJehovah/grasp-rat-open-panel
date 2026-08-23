@@ -9,6 +9,6 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
 EnvironmentFile=-/home/ubuntu/grasp-rat-open-panel/.env
 Environment=GRASP_RAT_PANEL_EGRESS_CONFIG=/home/ubuntu/grasp-rat-open-panel/src/deploy/egresses.json
-ExecStart=/usr/bin/env node commands/health-check.js
+ExecStart=/opt/node-v20.19.5-linux-arm64/bin/node commands/health-check.js
 NoNewPrivileges=true
 PrivateTmp=true

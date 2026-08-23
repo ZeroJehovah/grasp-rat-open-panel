@@ -7,6 +7,6 @@ Type=oneshot
 User=ubuntu
 WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
 EnvironmentFile=-/home/ubuntu/grasp-rat-open-panel/.env
-ExecStart=/usr/bin/env node commands/finalize-day.js
+ExecStart=/opt/node-v20.19.5-linux-arm64/bin/node commands/finalize-day.js
 NoNewPrivileges=true
 PrivateTmp=true
