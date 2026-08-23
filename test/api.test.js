@@ -4,6 +4,16 @@ const assert = require('assert');
 const zlib = require('zlib');
 const { ProjectionEngine } = require('../domain/projector');
 const { buildServer } = require('../api/server');
+const { rowToPlayer } = require('../storage/postgres-store');
+
+const nullDropPlayer = rowToPlayer({
+  user_id: 7,
+  current_name: 'null-drop',
+  online: true,
+  server_day: '2026-08-22',
+  state: { death_drop_coins: null }
+}, { kills: 0, deaths: 0 }, { currentDay: '2026-08-22' });
+assert.strictEqual(nullDropPlayer.drop, null);
 
 function fixture() {
   const fields = {

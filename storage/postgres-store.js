@@ -67,13 +67,14 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
   const isCurrentDay = !currentDay || rowDay === currentDay;
   const quotaValue = row.quota_value === null || row.quota_value === undefined ? null : Number(row.quota_value);
   const initialQuota = row.initial_quota === null || row.initial_quota === undefined ? null : Number(row.initial_quota);
+  const currentDrop = state.death_drop_coins === undefined ? null : numberOrNull(state.death_drop_coins);
   return {
     userId: Number(row.user_id),
     name: row.current_name || '',
     online: Boolean(row.online && isCurrentDay),
     lastSeenAt: toDate(row.last_seen_at),
     currentEntityId: row.current_entity_id === null ? null : Number(row.current_entity_id),
-    drop: isCurrentDay && state.death_drop_coins !== undefined ? Number(state.death_drop_coins) : null,
+    drop: isCurrentDay ? currentDrop : null,
     quota: row.quota_day ? {
       day: row.quota_day,
       initial: initialQuota,
