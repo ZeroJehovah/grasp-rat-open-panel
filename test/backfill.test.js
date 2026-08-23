@@ -13,6 +13,7 @@ fs.writeFileSync(path.join(root, file), '{}');
 fs.writeFileSync(path.join(root, 'manifest.jsonl'), `${JSON.stringify({ file, observedAt: '2026-08-21T12:27:09.399Z', statusCode: 200 })}\n`);
 const options = parseArgs(['--raw-dir', root, '--from', '2026-08-21', '--to', '2026-08-21']);
 assert.strictEqual(listBackfillItems(options).length, 1);
+assert.strictEqual(listBackfillItems({ ...options, limit: 1 }).length, 1);
 
 (async () => {
   const result = await runBackfill({ ...options, dryRun: true });

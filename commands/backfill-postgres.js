@@ -12,6 +12,7 @@ function parseArgs(argv) {
     rawDir: process.env.GRASP_RAT_PANEL_SNAPSHOT_DIR || path.resolve(__dirname, '../../data/raw-snapshots'),
     from: null,
     to: null,
+    limit: null,
     dryRun: false,
     minSteadyEntities: Number(process.env.PANEL_MIN_STEADY_ENTITIES || 900)
   };
@@ -21,6 +22,7 @@ function parseArgs(argv) {
     if (arg === '--raw-dir') options.rawDir = path.resolve(value());
     else if (arg === '--from') options.from = value();
     else if (arg === '--to') options.to = value();
+    else if (arg === '--limit') options.limit = Number(value());
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--min-steady-entities') options.minSteadyEntities = Number(value());
     else if (arg === '--help' || arg === '-h') options.help = true;
@@ -30,6 +32,7 @@ function parseArgs(argv) {
   if (!options.from || !options.to) throw new Error('--from and --to are required; this command never imports an unbounded live directory');
   businessDateRange(options.from, options.to);
   if (!Number.isInteger(options.minSteadyEntities) || options.minSteadyEntities < 0) throw new Error('min steady entities must be a non-negative integer');
+  if (options.limit !== null && (!Number.isInteger(options.limit) || options.limit <= 0)) throw new Error('limit must be a positive integer');
   return options;
 }
 
@@ -51,7 +54,7 @@ function listBackfillItems(options) {
   const directory = path.resolve(options.rawDir);
   const manifest = readManifest(directory);
   if (!fs.existsSync(directory)) throw new Error(`raw directory does not exist: ${directory}`);
-  return fs.readdirSync(directory)
+  const items = fs.readdirSync(directory)
     .filter(file => file.endsWith('.json') && file !== 'manifest.jsonl')
     .map(file => {
       const filePath = path.join(directory, file);
@@ -62,12 +65,13 @@ function listBackfillItems(options) {
     })
     .filter(item => item.businessDate && item.businessDate >= options.from && item.businessDate <= options.to)
     .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt) || a.file.localeCompare(b.file));
+  return options.limit ? items.slice(0, options.limit) : items;
 }
 
 async function targetIsEmpty(connectionString, ClientClass = Client) {
   const client = new ClientClass({ connectionString });
-  await client.connect();
   try {
+    await client.connect();
     const result = await client.query(`SELECT
       (SELECT count(*) FROM snapshot_observations)::bigint AS observations,
       (SELECT count(*) FROM snapshot_versions)::bigint AS versions,
@@ -78,7 +82,7 @@ async function targetIsEmpty(connectionString, ClientClass = Client) {
     const counts = Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Number(value)]));
     return { empty: Object.values(counts).every(value => value === 0), counts };
   } finally {
-    await client.end();
+    await client.end().catch(() => {});
   }
 }
 
@@ -134,7 +138,7 @@ if (require.main === module) {
   (async () => {
     try {
       const options = parseArgs(process.argv.slice(2));
-      if (options.help) console.log('Usage: PANEL_BACKFILL_DATABASE_URL=... node commands/backfill-postgres.js --raw-dir DIR --from YYYY-MM-DD --to YYYY-MM-DD [--dry-run]');
+      if (options.help) console.log('Usage: PANEL_BACKFILL_DATABASE_URL=... node commands/backfill-postgres.js --raw-dir DIR --from YYYY-MM-DD --to YYYY-MM-DD [--limit N] [--dry-run]');
       else console.log(JSON.stringify({ type: 'postgres-backfill-finished', ...(await runBackfill(options)) }, null, 2));
     } catch (error) {
       console.error(error?.stack || error);
