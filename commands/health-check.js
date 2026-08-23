@@ -112,6 +112,7 @@ function evaluateHealth({ collector, database, api, now = new Date(), options = 
   if (collector.consecutiveFailures > thresholds.maxConsecutiveFailures) failures.push('collector_failures');
   if (collector.availableEgressGroups?.A === 0 || collector.availableEgressGroups?.B === 0) warnings.push('egress_group_unavailable');
   if (collector.healthProbeEgressCount > 0) warnings.push('egress_probe_required');
+  if (collector.rawRetentionBacklogCount > 0) warnings.push('raw_retention_backlog');
   if (database && !database.ok) failures.push('database_unhealthy');
   if (database?.latestAgeMs !== null && database?.latestAgeMs > thresholds.maxLatestSuccessAgeMs) failures.push('database_stale');
   if (database?.versionGapMs !== null && database?.versionGapMs > thresholds.maxVersionGapMs) failures.push('version_gap');

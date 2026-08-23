@@ -28,7 +28,8 @@ const unhealthy = evaluateHealth({
     diskFreeBytes: 1,
     consecutiveFailures: 3,
     availableEgressGroups: { A: 0, B: 1 },
-    healthProbeEgressCount: 1
+    healthProbeEgressCount: 1,
+    rawRetentionBacklogCount: 4
   },
   database: { configured: true, ok: true, latestAgeMs: 400_000, versionGapMs: 400_000 },
   api: { ok: false, statusCode: 503 },
@@ -36,5 +37,5 @@ const unhealthy = evaluateHealth({
 });
 assert.strictEqual(unhealthy.ok, false);
 assert.deepStrictEqual(unhealthy.failures, ['collector_stale', 'queue_backlog', 'disk_low', 'collector_failures', 'database_stale', 'version_gap', 'api_unhealthy']);
-assert.deepStrictEqual(unhealthy.warnings, ['egress_group_unavailable', 'egress_probe_required']);
+assert.deepStrictEqual(unhealthy.warnings, ['egress_group_unavailable', 'egress_probe_required', 'raw_retention_backlog']);
 console.log('health check tests passed');

@@ -17,8 +17,24 @@ function readState(filePath) {
   try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (_) { return null; }
 }
 
+function rawRetentionBacklog(directory, now = Date.now()) {
+  let count = 0;
+  let bytes = 0;
+  try {
+    for (const file of fs.readdirSync(directory).filter(name => name.endsWith('.json') && name !== 'manifest.jsonl')) {
+      const filePath = path.join(directory, file);
+      const stat = fs.statSync(filePath);
+      if (stat.mtimeMs < now - 24 * 60 * 60 * 1000) {
+        count += 1;
+        bytes += Number(stat.size || 0);
+      }
+    }
+  } catch (_) { /* the disk/queue checks remain useful during a directory race */ }
+  return { count, bytes };
+}
+
 function collectorHealth(options = {}) {
-  const now = Date.now();
+  const now = options.now || Date.now();
   const statePath = options.stateFile || process.env.GRASP_RAT_PANEL_STATE_FILE || path.resolve(__dirname, '../../data/collector-state.json');
   const queueDir = options.queueDir || process.env.GRASP_RAT_PANEL_QUEUE_DIR || path.resolve(__dirname, '../../data/spool');
   const rawDir = options.rawDir || process.env.GRASP_RAT_PANEL_SNAPSHOT_DIR || path.resolve(__dirname, '../../data/raw-snapshots');
@@ -47,6 +63,7 @@ function collectorHealth(options = {}) {
     else if (runtimePool.has(egress.id) && Number(item.next_eligible_at || 0) <= now) egress.group === 'A' ? availableA += 1 : availableB += 1;
   }
   const count = directory => { try { return fs.readdirSync(directory).filter(file => file.endsWith('.body')).length; } catch (_) { return 0; } };
+  const rawBacklog = rawRetentionBacklog(rawDir, now);
   return {
     latestSuccessVersionAgeMs: latestSuccessAt ? Math.max(0, now - latestSuccessAt) : null,
     latestSuccessAt: latestSuccessAt ? new Date(latestSuccessAt).toISOString() : null,
@@ -56,6 +73,8 @@ function collectorHealth(options = {}) {
     healthProbeEgressCount: probes,
     consecutiveFailures: Number(state.consecutiveFailures || 0),
     diskFreeBytes: diskFreeBytes(rawDir),
+    rawRetentionBacklogCount: rawBacklog.count,
+    rawRetentionBacklogBytes: rawBacklog.bytes,
     dailyBenchmark: egressPlan.dailyBenchmark,
     candidateEgressCount: egresses.length,
     activeEgressIds: state.activeEgressIds || [],
@@ -64,4 +83,4 @@ function collectorHealth(options = {}) {
   };
 }
 
-module.exports = { diskFreeBytes, collectorHealth };
+module.exports = { diskFreeBytes, rawRetentionBacklog, collectorHealth };
