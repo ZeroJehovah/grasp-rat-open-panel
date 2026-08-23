@@ -115,6 +115,14 @@ function observation(engine, value, time) {
 
 (() => {
   const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  observation(engine, body(600, { entity: { extra_first: 1, extra_second: 2 } }), '00:24:00');
+  observation(engine, body(700, { entity: { extra_second: 2, extra_first: 1 } }), '00:25:00');
+  assert.strictEqual(engine.stateDeltas.length, 0);
+  assert.strictEqual(engine.verifyRebuild().ok, true);
+})();
+
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
   observation(engine, body(500, { entity: { death_drop_coins: 5 } }), '00:22:00');
   const nextDay = observation(engine, body(10, { entity: { death_drop_coins: 3, daily_budget_day_key_utc8: 20688 } }), '00:23:00');
   assert.strictEqual(nextDay.parsed.serverDay, '2026-08-23');

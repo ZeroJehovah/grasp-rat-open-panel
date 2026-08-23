@@ -64,6 +64,26 @@ function sortNames(values) {
   return values.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-u-co-pinyin') || String(a.user_id).localeCompare(String(b.user_id)));
 }
 
+function historyQuotaView(row) {
+  return {
+    local_date: String(row.local_date).slice(0, 10),
+    user_id: Number(row.user_id),
+    initial_quota: numeric(row.initial_quota),
+    closing_quota: numeric(row.closing_quota),
+    income: numeric(row.income),
+    finalized_at: row.finalized_at || null
+  };
+}
+
+function historyStatView(row) {
+  return {
+    local_date: String(row.local_date).slice(0, 10),
+    user_id: Number(row.user_id),
+    kills: Number(row.kills || 0),
+    deaths: Number(row.deaths || 0)
+  };
+}
+
 function parseKillNames(text) {
   const match = /^(.*?)\s+killed\s+(.*)$/i.exec(String(text || ''));
   return match ? { killer: match[1].trim(), victim: match[2].trim() } : { killer: null, victim: null };
@@ -354,7 +374,12 @@ class ProjectionEngine {
         old.last_observed_at = version.observed_at;
         const oldKill = this.kills.get(messageKey);
         if (oldKill) {
-          this.attachKillEvidence(oldKill, evidenceStates);
+          const oldEvidence = this.versions.find(item => item.snapshot_id === oldKill.evidence_snapshot_id);
+          // A warming-up event may have been recorded before currentStates was
+          // advanced. Once a steady version arrives, use that new state as the
+          // evidence source so the stored evidence is not permanently tied to
+          // an incomplete snapshot.
+          this.attachKillEvidence(oldKill, oldEvidence?.completeness === 'warming_up' ? this.currentStates : evidenceStates);
           this.touchKill(oldKill);
         }
         continue;
@@ -415,18 +440,20 @@ class ProjectionEngine {
   attachKillEvidence(kill, evidenceStates) {
     const victim = evidenceStates.get(userKey(kill.victim_user_id));
     const killer = evidenceStates.get(userKey(kill.killer_user_id));
+    let refreshEvidence = false;
     if (victim) {
       const previousEvidence = this.versions.find(version => version.snapshot_id === kill.evidence_snapshot_id);
       const needsStableEvidence = !kill.evidence_snapshot_id || previousEvidence?.completeness !== 'steady';
-      if (!kill.victim_position) kill.victim_position = { x: numeric(victim.x), y: numeric(victim.y) };
-      if (kill.victim_stamina_5s === null) kill.victim_stamina_5s = numeric(victim.stamina_5s_remaining_milli);
-      if (kill.victim_stamina_5s_limit === null) kill.victim_stamina_5s_limit = numeric(victim.stamina_5s_limit_milli);
+      refreshEvidence = needsStableEvidence;
+      if (needsStableEvidence || !kill.victim_position) kill.victim_position = { x: numeric(victim.x), y: numeric(victim.y) };
+      if (needsStableEvidence || kill.victim_stamina_5s === null) kill.victim_stamina_5s = numeric(victim.stamina_5s_remaining_milli);
+      if (needsStableEvidence || kill.victim_stamina_5s_limit === null) kill.victim_stamina_5s_limit = numeric(victim.stamina_5s_limit_milli);
       if (needsStableEvidence) kill.evidence_snapshot_id = victim.snapshot_id || kill.evidence_snapshot_id;
-      if (kill.drop === null && Object.prototype.hasOwnProperty.call(victim, 'death_drop_coins')) {
+      if ((needsStableEvidence || kill.drop === null) && Object.prototype.hasOwnProperty.call(victim, 'death_drop_coins')) {
         kill.drop = { amount: numeric(victim.death_drop_coins), confidence: 'confirmed', evidence_snapshot_id: victim.snapshot_id || null };
       }
     }
-    if (killer && !kill.killer_position) kill.killer_position = { x: numeric(killer.x), y: numeric(killer.y) };
+    if (killer && (!kill.killer_position || refreshEvidence)) kill.killer_position = { x: numeric(killer.x), y: numeric(killer.y) };
   }
 
   incrementDailyStat(localDate, id, field) {
@@ -479,7 +506,7 @@ class ProjectionEngine {
       }
     }
     for (const kill of this.kills.values()) {
-      if (kill.coin_drop || kill.server_day !== parsed.serverDay) continue;
+      if (kill.coin_drop?.confidence === 'confirmed' || kill.server_day !== parsed.serverDay) continue;
       const candidate = Array.from(this.drops.values()).find(drop => drop.server_day === parsed.serverDay && !drop.system_spawned && drop.created_tick === kill.tick && drop.source_user_id === kill.killer_user_id);
       if (candidate) {
         kill.coin_drop = { drop_id: candidate.drop_id, amount: candidate.amount, x: candidate.x, y: candidate.y, confidence: 'confirmed' };
@@ -710,8 +737,8 @@ class ProjectionEngine {
     if (versionToken && versionToken === version.version_token) return { unchanged: true, versionToken: version.version_token, generatedAt: new Date().toISOString() };
     const today = version.server_day;
     const players = this.selectRealtimeUsers(today);
-    const messages = Array.from(this.messages.values()).filter(message => message.local_date === today).sort((a, b) => a.event_at.localeCompare(b.event_at));
-    const kills = Array.from(this.kills.values()).filter(kill => kill.local_date === today).sort((a, b) => a.event_at.localeCompare(b.event_at));
+    const messages = Array.from(this.messages.values()).filter(message => message.local_date === today).sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.server_day).localeCompare(String(b.server_day)) || String(a.message_id).localeCompare(String(b.message_id)));
+    const kills = Array.from(this.kills.values()).filter(kill => kill.local_date === today).sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.local_date).localeCompare(String(b.local_date)) || String(a.kill_id).localeCompare(String(b.kill_id)));
     return {
       unchanged: false,
       versionToken: version.version_token,
@@ -728,11 +755,11 @@ class ProjectionEngine {
   }
 
   getHistory(range) {
-    const messages = Array.from(this.messages.values()).filter(message => message.local_date >= range.from && message.local_date <= range.to).sort((a, b) => a.event_at.localeCompare(b.event_at));
-    const kills = Array.from(this.kills.values()).filter(kill => kill.local_date >= range.from && kill.local_date <= range.to).sort((a, b) => a.event_at.localeCompare(b.event_at));
+    const messages = Array.from(this.messages.values()).filter(message => message.local_date >= range.from && message.local_date <= range.to).sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.server_day).localeCompare(String(b.server_day)) || String(a.message_id).localeCompare(String(b.message_id)));
+    const kills = Array.from(this.kills.values()).filter(kill => kill.local_date >= range.from && kill.local_date <= range.to).sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.local_date).localeCompare(String(b.local_date)) || String(a.kill_id).localeCompare(String(b.kill_id)));
     const players = sortNames(Array.from(this.players.keys()).map(uid => this.currentPlayerView(uid, range, this.lastStableVersion?.server_day)).filter(Boolean));
-    const dailyQuota = Array.from(this.dailyQuota.values()).filter(item => item.local_date >= range.from && item.local_date <= range.to);
-    const stats = Array.from(this.dailyStats.values()).filter(item => item.local_date >= range.from && item.local_date <= range.to);
+    const dailyQuota = Array.from(this.dailyQuota.values()).filter(item => item.local_date >= range.from && item.local_date <= range.to).sort((a, b) => String(a.local_date).localeCompare(String(b.local_date)) || Number(a.user_id) - Number(b.user_id)).map(historyQuotaView);
+    const stats = Array.from(this.dailyStats.values()).filter(item => item.local_date >= range.from && item.local_date <= range.to).sort((a, b) => String(a.local_date).localeCompare(String(b.local_date)) || Number(a.user_id) - Number(b.user_id)).map(historyStatView);
     const latest = this.lastStableVersion?.server_day || null;
     return {
       from: range.from,
@@ -769,6 +796,7 @@ class ProjectionEngine {
       if (!state || state.segment_id !== record.segment_id) continue;
       for (const [field, value] of Object.entries(record.changed_values)) state[field] = cloneJson(value);
       for (const field of record.missing_fields || []) delete state[field];
+      if ((record.changed_mask || []).includes('extra')) state.extra = cloneJson(record.extra || {});
       state.snapshot_id = record.snapshot_id;
     }
     return bases;

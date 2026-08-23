@@ -236,10 +236,11 @@ function PlayersTable({ players, map, rangeLabel }: { players: Player[]; map: Ma
 
 function playerCandidates(players: Player[]): Player[] {
   const selected = new Set<number>();
-  const top = (value: (player: Player) => number | null | undefined) => players.slice().sort((a, b) => {
-    const av = value(a); const bv = value(b);
-    if (av === null || av === undefined) return 1;
-    if (bv === null || bv === undefined) return -1;
+  const top = (value: (player: Player) => number | null | undefined) => players.filter(player => {
+    const current = value(player);
+    return current !== null && current !== undefined && Number.isFinite(Number(current));
+  }).sort((a, b) => {
+    const av = Number(value(a)); const bv = Number(value(b));
     return bv - av || a.name.localeCompare(b.name) || a.userId - b.userId;
   }).slice(0, 50);
   for (const player of top(player => player.quota?.value)) selected.add(player.userId);

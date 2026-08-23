@@ -52,6 +52,13 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   recovered.recoverPartialMoves();
   assert.ok(recovered.pendingItems().some(item => item.observationId === 'partial-failed'));
 
+  const metadataFirst = queue.enqueue({ observationId: 'metadata-first' }, Buffer.from('body'));
+  const metadataFirstPath = metadataFirst.bodyPath.replace(/\.body$/, '.json');
+  fs.renameSync(metadataFirstPath, path.join(queue.processed, path.basename(metadataFirstPath)));
+  const metadataFirstRecovered = new DurableObservationQueue(queue.root);
+  metadataFirstRecovered.recoverPartialMoves();
+  assert.ok(metadataFirstRecovered.pendingItems().some(item => item.observationId === 'metadata-first'));
+
   const retryQueue = new DurableObservationQueue(path.join(root, 'retry-queue'));
   const retry = retryQueue.enqueue({ observationId: 'retry-me' }, Buffer.from('body'));
   const failedResult = await retryQueue.process(async () => { throw new Error('parse failed'); }, { maxAttempts: 1 });
@@ -128,4 +135,28 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   assert.strictEqual(result.ok, true);
   assert.deepStrictEqual(calls, ['A1', 'B1', 'A2']);
   console.log('collector tests passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+(async () => {
+  const outputDir = tempDir();
+  const scheduler = new EgressScheduler({ statePath: path.join(outputDir, 'state.json'), egresses, minIpIntervalMs: 30_001 });
+  const payload = Buffer.from(JSON.stringify({ type: 'snapshot', tick: 1, total_entities: 0, in_game: 0, visible: 0, occupied_cells: 0, entities: [], bullets: [], coin_drops: [], messages: [] }));
+  let now = 0;
+  const calls = [];
+  const result = await runCollector({ outputDir, stateFile: path.join(outputDir, 'state.json'), untilMs: 75_002, once: false, intervalMs: 15_000, extraRetryMax: 0, retryJitterMs: 0 }, {
+    scheduler,
+    now: () => now,
+    sleep: async milliseconds => { now += milliseconds; },
+    requestSnapshot: async (_options, clock, egress) => {
+      calls.push({ id: egress.id, at: clock() });
+      return { statusCode: 200, body: payload, durationMs: 1 };
+    }
+  });
+  assert.strictEqual(result.collectorGaps, 0);
+  assert.deepStrictEqual(calls.map(call => call.id), ['A1', 'B1', 'A2', 'B2', 'A1', 'B1']);
+  for (const id of ['A1', 'B1', 'A2', 'B2']) {
+    const times = calls.filter(call => call.id === id).map(call => call.at);
+    for (let index = 1; index < times.length; index += 1) assert.ok(times[index] - times[index - 1] > 30_000);
+  }
+  console.log('collector cadence tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

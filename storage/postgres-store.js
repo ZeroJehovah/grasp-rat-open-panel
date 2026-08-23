@@ -133,7 +133,7 @@ class PostgresPanelStore {
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats'),
       this.query('SELECT user_id, name, first_observed_at, last_observed_at FROM player_name_history'),
       this.query('SELECT user_id, entity_id, reset_generation, first_snapshot_id, last_snapshot_id, first_observed_at, last_observed_at FROM player_entity_history'),
-      this.query('SELECT user_id, segment_id, server_day::text, online_from_snapshot_id, online_to_snapshot_id, online_from_at, online_to_at, closed_reason FROM player_online_interval WHERE online_to_snapshot_id IS NULL'),
+      this.query('SELECT user_id, segment_id, server_day::text, online_from_snapshot_id, online_to_snapshot_id, online_from_at, online_to_at, closed_reason FROM player_online_interval ORDER BY online_from_at'),
       this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
     ]);
     const engine = this.engine;
@@ -197,7 +197,7 @@ class PostgresPanelStore {
       snapshot_id: row.snapshot_id,
       user_id: Number(row.user_id),
       segment_id: row.segment_id,
-      changed_mask: row.changed_mask || {},
+      changed_mask: row.changed_mask || [],
       changed_values: row.changed_values || {},
       missing_fields: row.missing_fields || [],
       extra: row.extra || {},
@@ -215,17 +215,42 @@ class PostgresPanelStore {
         updated_at: toDate(row.updated_at)
       });
     }
-    for (const row of dailyQuotaResult.rows) engine.dailyQuota.set(mapKey(row.local_date, row.user_id), { ...row, local_date: String(row.local_date).slice(0, 10), user_id: Number(row.user_id) });
+    for (const row of dailyQuotaResult.rows) engine.dailyQuota.set(mapKey(row.local_date, row.user_id), {
+      ...row,
+      local_date: String(row.local_date).slice(0, 10),
+      user_id: Number(row.user_id),
+      initial_quota: numberOrNull(row.initial_quota),
+      closing_quota: numberOrNull(row.closing_quota),
+      income: numberOrNull(row.income),
+      finalized_at: row.finalized_at ? toDate(row.finalized_at) : null
+    });
     for (const row of namesResult.rows) engine.nameHistory.set(mapKey(row.user_id, row.name), { ...row, user_id: Number(row.user_id) });
     for (const row of entitiesResult.rows) engine.entityHistory.set(mapKey(row.user_id, row.entity_id, row.reset_generation), { ...row, user_id: Number(row.user_id), entity_id: Number(row.entity_id), reset_generation: Number(row.reset_generation) });
     for (const row of messagesResult.rows) engine.messages.set(String(row.message_id), { ...row, message_id: String(row.message_id), server_day: String(row.server_day).slice(0, 10), local_date: String(row.server_day).slice(0, 10), event_at: toDate(row.event_at), first_observed_at: toDate(row.first_observed_at), last_observed_at: toDate(row.last_observed_at) });
     for (const row of killsResult.rows) engine.kills.set(String(row.kill_id), { ...row, kill_id: String(row.kill_id), message_id: String(row.message_id), local_date: String(row.local_date).slice(0, 10), server_day: String(row.server_day).slice(0, 10), event_at: toDate(row.event_at), victim_position: row.victim_position, killer_position: row.killer_position, victim_stamina_5s: row.victim_stamina_5s === null ? null : Number(row.victim_stamina_5s), victim_stamina_5s_limit: row.victim_stamina_5s_limit === null ? null : Number(row.victim_stamina_5s_limit) });
     for (const row of dropsResult.rows) engine.drops.set(mapKey(row.server_day, row.drop_id), { ...row, server_day: String(row.server_day).slice(0, 10), drop_id: Number(row.drop_id), first_seen_at: toDate(row.first_seen_at), last_seen_at: toDate(row.last_seen_at), disappeared_at: row.disappeared_at ? toDate(row.disappeared_at) : null });
     for (const row of statsResult.rows) engine.dailyStats.set(mapKey(row.local_date, row.user_id), { ...row, local_date: String(row.local_date).slice(0, 10), user_id: Number(row.user_id), kills: Number(row.kills), deaths: Number(row.deaths) });
+    // Kill events are the durable de-duplicated source for daily stats. This
+    // reconstruction also covers a crash after a warming-up kill was stored
+    // but before the next steady snapshot could persist its FK-dependent
+    // aggregate row.
+    const rebuiltStats = new Map();
+    for (const kill of engine.kills.values()) {
+      const add = (userId, field) => {
+        if (userId === null || userId === undefined) return;
+        const key = mapKey(kill.local_date, userId);
+        const stat = rebuiltStats.get(key) || { local_date: kill.local_date, user_id: Number(userId), kills: 0, deaths: 0 };
+        stat[field] += 1;
+        rebuiltStats.set(key, stat);
+      };
+      add(kill.killer_user_id, 'kills');
+      add(kill.victim_user_id, 'deaths');
+    }
+    for (const [key, stat] of rebuiltStats) engine.dailyStats.set(key, stat);
     for (const row of intervalsResult.rows) {
       const interval = { user_id: Number(row.user_id), segment_id: row.segment_id, server_day: String(row.server_day).slice(0, 10), online_from_snapshot_id: row.online_from_snapshot_id, online_to_snapshot_id: row.online_to_snapshot_id, online_from_at: toDate(row.online_from_at), online_to_at: row.online_to_at ? toDate(row.online_to_at) : null, closed_reason: row.closed_reason };
       engine.onlineIntervals.push(interval);
-      engine.openIntervals.set(String(row.user_id), interval);
+      if (interval.online_to_snapshot_id === null) engine.openIntervals.set(String(row.user_id), interval);
     }
     return { latestStable, latestObserved, users: engine.currentStates.size };
   }
@@ -266,8 +291,8 @@ class PostgresPanelStore {
         LEFT JOIN player_quota_current q ON q.user_id = p.user_id
         LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
         WHERE c.server_day = $1::date AND c.online = true`, [latest.server_day]),
-      this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day = $1::date ORDER BY event_at', [latest.server_day]),
-      this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date = $1::date ORDER BY event_at', [latest.server_day]),
+      this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id', [latest.server_day]),
+      this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id', [latest.server_day]),
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats WHERE local_date = $1::date', [latest.server_day]),
       this.query('SELECT user_id, quota_day::text, initial_quota, quota_value, last_drop, last_loss FROM player_quota_current WHERE quota_day = $1::date', [latest.server_day]),
       this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
@@ -336,7 +361,7 @@ class PostgresPanelStore {
       timezone: BUSINESS_TIMEZONE,
       generatedAt: new Date().toISOString(),
       closedThrough: latest && range.to < String(latest.server_day).slice(0, 10) ? range.to : null,
-      players: playerRows.map(row => rowToPlayer(row, statMap.get(String(row.user_id)), { currentDay: latest?.server_day })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin')),
+      players: playerRows.map(row => rowToPlayer(row, statMap.get(String(row.user_id)), { currentDay: latest?.server_day })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin') || a.userId - b.userId),
       messages: messageRows,
       kills: killRows,
       dailyQuota: quotaRows.map(historyQuotaRow),
@@ -432,6 +457,10 @@ class PostgresPanelStore {
     }
     for (const stat of this.engine.dailyStats.values()) {
       if (stat.local_date !== parsed.serverDay) continue;
+      // A warming-up message may refer to a user that has not yet appeared in
+      // a stable entity set. Keep its kill event, but wait for the player row
+      // before satisfying the deliberate daily-stats foreign key.
+      if (!this.engine.players.has(String(stat.user_id))) continue;
       await client.query(`INSERT INTO player_daily_stats (local_date, user_id, kills, deaths) VALUES ($1::date, $2, $3, $4) ON CONFLICT (local_date, user_id) DO UPDATE SET kills = EXCLUDED.kills, deaths = EXCLUDED.deaths`, [stat.local_date, stat.user_id, stat.kills, stat.deaths]);
     }
     for (const quota of this.engine.quotaCurrent.values()) {
@@ -443,7 +472,7 @@ class PostgresPanelStore {
     }
     for (const daily of this.engine.dailyQuota.values()) {
       if (daily.local_date !== parsed.serverDay) continue;
-      await client.query(`INSERT INTO player_daily_quota (local_date, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id) VALUES ($1::date, $2, $3, $4, $5, $6, $7) ON CONFLICT (local_date, user_id) DO UPDATE SET closing_quota = EXCLUDED.closing_quota, income = EXCLUDED.income, finalized_at = EXCLUDED.finalized_at, source_snapshot_id = EXCLUDED.source_snapshot_id`, [daily.local_date, daily.user_id, daily.initial_quota, daily.closing_quota, daily.income, daily.finalized_at, daily.source_snapshot_id]);
+      await client.query(`INSERT INTO player_daily_quota (local_date, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id) VALUES ($1::date, $2, $3, $4, $5, $6, $7) ON CONFLICT (local_date, user_id) DO UPDATE SET closing_quota = EXCLUDED.closing_quota, income = EXCLUDED.income, finalized_at = COALESCE(player_daily_quota.finalized_at, EXCLUDED.finalized_at), source_snapshot_id = EXCLUDED.source_snapshot_id`, [daily.local_date, daily.user_id, daily.initial_quota, daily.closing_quota, daily.income, daily.finalized_at, daily.source_snapshot_id]);
     }
     await client.query(`INSERT INTO map_metadata (map_id, version, payload) VALUES ($1, $2, $3::jsonb) ON CONFLICT (map_id, version) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`, [this.engine.mapMetadata.id, this.engine.mapMetadata.version, JSON.stringify(this.engine.mapMetadata)]);
   }

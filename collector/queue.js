@@ -8,6 +8,19 @@ function ensure(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 }
 
+function syncDirectory(directory) {
+  try {
+    const fd = fs.openSync(directory, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  } catch (_) { /* some filesystems do not allow directory fsync */ }
+}
+
+function durableRename(source, target) {
+  fs.renameSync(source, target);
+  syncDirectory(path.dirname(source));
+  if (path.dirname(source) !== path.dirname(target)) syncDirectory(path.dirname(target));
+}
+
 function atomicWrite(filePath, body) {
   const temp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   const fd = fs.openSync(temp, 'wx', 0o600);
@@ -17,7 +30,7 @@ function atomicWrite(filePath, body) {
   } finally {
     fs.closeSync(fd);
   }
-  fs.renameSync(temp, filePath);
+  durableRename(temp, filePath);
 }
 
 function writeBodyDurably(filePath, body) {
@@ -29,7 +42,7 @@ function writeBodyDurably(filePath, body) {
   } finally {
     fs.closeSync(fd);
   }
-  fs.renameSync(temp, filePath);
+  durableRename(temp, filePath);
 }
 
 function readJson(filePath) {
@@ -79,21 +92,38 @@ class DurableObservationQueue {
 
   recoverPartialMoves() {
     const directories = [this.pending, this.processed, this.failed];
-    const targets = [this.processed, this.failed, this.pending];
+    const metadataByName = new Map();
+    const bodyByName = new Map();
     for (const directory of directories) {
-      for (const file of fs.readdirSync(directory).filter(name => name.endsWith('.json'))) {
-        const metadataPath = path.join(directory, file);
-        if (!readJson(metadataPath)) continue;
-        const bodyName = file.replace(/\.json$/, '.body');
-        for (const target of targets) {
-          if (target === directory) continue;
-          const targetBody = path.join(target, bodyName);
-          const targetMetadata = path.join(target, file);
-          if (!fs.existsSync(targetBody) || fs.existsSync(targetMetadata)) continue;
-          fs.renameSync(metadataPath, targetMetadata);
-          break;
+      for (const file of fs.readdirSync(directory)) {
+        if (file.endsWith('.json')) {
+          const metadataPath = path.join(directory, file);
+          if (readJson(metadataPath)) metadataByName.set(file, [...(metadataByName.get(file) || []), metadataPath]);
+        } else if (file.endsWith('.body')) {
+          const bodyPath = path.join(directory, file);
+          bodyByName.set(file, [...(bodyByName.get(file) || []), bodyPath]);
         }
       }
+    }
+    for (const [metadataName, metadataPaths] of metadataByName) {
+      if (metadataPaths.length !== 1) continue;
+      const metadataPath = metadataPaths[0];
+      const bodyName = metadataName.replace(/\.json$/, '.body');
+      const bodyPaths = bodyByName.get(bodyName) || [];
+      if (bodyPaths.length !== 1) continue;
+      const bodyPath = bodyPaths[0];
+      const metadataDirectory = path.dirname(metadataPath);
+      const bodyDirectory = path.dirname(bodyPath);
+      // The body is renamed first during processing. If it already reached a
+      // terminal directory, follow it and complete the metadata move. The
+      // inverse handles a crash after the metadata move. Pending/pending is a
+      // complete pair and needs no action.
+      const targetDirectory = bodyDirectory !== this.pending ? bodyDirectory
+        : metadataDirectory !== this.pending ? this.pending
+          : null;
+      if (!targetDirectory) continue;
+      if (bodyDirectory !== targetDirectory) durableRename(bodyPath, path.join(targetDirectory, bodyName));
+      if (metadataDirectory !== targetDirectory) durableRename(metadataPath, path.join(targetDirectory, metadataName));
     }
   }
 
@@ -151,8 +181,8 @@ class DurableObservationQueue {
       if (Number.isFinite(availableAt) && availableAt > now) continue;
       const bodyPath = path.join(this.failed, file.replace(/\.json$/, '.body'));
       if (!fs.existsSync(bodyPath)) continue;
-      fs.renameSync(bodyPath, path.join(this.pending, path.basename(bodyPath)));
-      fs.renameSync(metadataPath, path.join(this.pending, path.basename(metadataPath)));
+      durableRename(bodyPath, path.join(this.pending, path.basename(bodyPath)));
+      durableRename(metadataPath, path.join(this.pending, path.basename(metadataPath)));
       recovered += 1;
     }
     return recovered;
@@ -177,8 +207,8 @@ class DurableObservationQueue {
         atomicWrite(item.metadataPath, Buffer.from(`${JSON.stringify(item)}\n`));
         const destinationBody = path.join(this.processed, path.basename(item.bodyPath));
         const destinationMetadata = path.join(this.processed, path.basename(item.metadataPath));
-        fs.renameSync(item.bodyPath, destinationBody);
-        fs.renameSync(item.metadataPath, destinationMetadata);
+        durableRename(item.bodyPath, destinationBody);
+        durableRename(item.metadataPath, destinationMetadata);
         appendDurably(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'processed', at: new Date().toISOString() })}\n`);
         processed.push({ item, status: 'processed' });
       } catch (error) {
@@ -189,8 +219,8 @@ class DurableObservationQueue {
           const destinationBody = path.join(this.failed, path.basename(item.bodyPath));
           const destinationMetadata = path.join(this.failed, path.basename(item.metadataPath));
           atomicWrite(item.metadataPath, Buffer.from(`${JSON.stringify(item)}\n`));
-          fs.renameSync(item.bodyPath, destinationBody);
-          fs.renameSync(item.metadataPath, destinationMetadata);
+          durableRename(item.bodyPath, destinationBody);
+          durableRename(item.metadataPath, destinationMetadata);
           item.bodyPath = destinationBody;
           item.metadataPath = destinationMetadata;
           appendDurably(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'failed', attempts: item.attempts, at: new Date().toISOString() })}\n`);

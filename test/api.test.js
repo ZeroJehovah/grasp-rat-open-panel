@@ -42,6 +42,8 @@ function fixture() {
   const history = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22' });
   assert.strictEqual(history.statusCode, 200);
   assert.strictEqual(history.json().from, '2026-08-22');
+  const cachedHistory = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22', headers: { 'if-none-match': history.headers.etag } });
+  assert.strictEqual(cachedHistory.statusCode, 304);
   await app.close();
 
   const oversizedApp = await buildServer({ store: {

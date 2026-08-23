@@ -129,7 +129,9 @@ async function buildServer(options = {}) {
     const cache = isClosed ? 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400' : 'public, max-age=5, s-maxage=10, stale-while-revalidate=30';
     reply.header('Cache-Control', cache);
     reply.header('CDN-Cache-Control', cache);
-    reply.header('ETag', etagFor(stablePayload(payload)));
+    const tag = etagFor(stablePayload(payload));
+    reply.header('ETag', tag);
+    if (request.headers['if-none-match'] === tag) return reply.code(304).send();
     return payload;
   });
 

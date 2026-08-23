@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { isDeepStrictEqual } = require('util');
 
 const BUSINESS_TIMEZONE = 'Asia/Shanghai';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -303,6 +304,11 @@ function diffState(previous, current) {
       if (currentHas) changedValues[field] = cloneJson(currentValue);
       else missingFields.push(field);
     }
+  }
+  const previousExtra = previous?.extra || {};
+  const currentExtra = current?.extra || {};
+  if (!isDeepStrictEqual(previousExtra, currentExtra)) {
+    changedFields.push('extra');
   }
   return { changedFields, changedValues, missingFields, changedMask: changedFields.slice() };
 }
