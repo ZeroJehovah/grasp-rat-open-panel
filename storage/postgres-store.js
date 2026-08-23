@@ -93,6 +93,8 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
       maxHp: state.max_hp ?? null,
       x: state.x ?? null,
       y: state.y ?? null,
+      invulnerableRemainingSecs: numberOrNull(state.invulnerable_remaining_secs),
+      loss: numberOrNull(state.death_loss_preview),
       stamina5s: state.stamina_5s_remaining_milli ?? null,
       stamina1h: state.stamina_1h_remaining_milli ?? null,
       stamina1d: state.stamina_1d_remaining_milli ?? null,
@@ -103,6 +105,29 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
       life: state.life ?? null,
       snapshotId: row.snapshot_id,
       observedAt: toDate(row.observed_at)
+    } : null
+  };
+}
+
+function mapPlayerView(player) {
+  return {
+    userId: player.userId,
+    name: player.name,
+    online: player.online,
+    drop: player.drop,
+    state: player.state ? {
+      hp: player.state.hp,
+      maxHp: player.state.maxHp,
+      x: player.state.x,
+      y: player.state.y,
+      invulnerableRemainingSecs: player.state.invulnerableRemainingSecs,
+      loss: player.state.loss,
+      stamina5s: player.state.stamina5s,
+      stamina1h: player.state.stamina1h,
+      stamina1d: player.state.stamina1d,
+      stamina5sLimit: player.state.stamina5sLimit,
+      stamina1hLimit: player.state.stamina1hLimit,
+      stamina1dLimit: player.state.stamina1dLimit
     } : null
   };
 }
@@ -412,6 +437,140 @@ class PostgresPanelStore {
       stats: statRows.map(historyStatRow)
     };
   }
+
+  async getRealtimeResource(resource, versionToken = null) {
+    const latest = await this.getLatestVersion();
+    if (!latest) {
+      const empty = { unchanged: false, versionToken: null, latest: null, serverDay: null };
+      if (resource === 'chat') empty.messages = [];
+      if (resource === 'map') { empty.map = this.engine.mapMetadata; empty.players = []; }
+      if (resource === 'players') empty.players = [];
+      if (resource === 'kills') empty.kills = [];
+      return empty;
+    }
+    if (versionToken && versionToken === latest.version_token) return { unchanged: true, versionToken: latest.version_token };
+    const common = { versionToken: latest.version_token, latest, serverDay: String(latest.server_day).slice(0, 10) };
+    if (resource === 'chat') {
+      const result = await this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id', [latest.server_day]);
+      return { ...common, messages: result.rows };
+    }
+    if (resource === 'kills') {
+      const result = await this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id', [latest.server_day]);
+      return { ...common, kills: result.rows };
+    }
+    if (resource === 'map') {
+      const [playersResult, mapResult] = await Promise.all([
+        this.query(`SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
+            c.server_day::text, c.snapshot_id, c.observed_at, c.state
+          FROM players p
+          INNER JOIN player_state_current c ON c.user_id = p.user_id
+          WHERE c.server_day = $1::date AND c.online = true`, [latest.server_day]),
+        this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
+      ]);
+      let players = playersResult.rows.map(row => rowToPlayer(row, { kills: 0, deaths: 0 }, { currentDay: latest.server_day }));
+      players = players.filter(player => {
+        const tired = player.state?.stamina1d !== null && player.state?.stamina1dLimit !== null && player.state.stamina1d < player.state.stamina1dLimit;
+        return (player.drop !== null && player.drop >= 1) || tired;
+      });
+      return { ...common, map: mapResult.rows[0]?.payload || this.engine.mapMetadata, players: players.map(mapPlayerView) };
+    }
+    if (resource === 'players') {
+      const result = await this.query(`WITH player_rows AS (
+          SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
+            c.server_day::text, c.snapshot_id, c.observed_at, c.state,
+            q.quota_day::text, q.initial_quota, q.quota_value,
+            d.income,
+            s.kills, s.deaths
+          FROM players p
+          INNER JOIN player_state_current c ON c.user_id = p.user_id
+          LEFT JOIN player_quota_current q ON q.user_id = p.user_id AND q.quota_day = $1::date
+          LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
+          LEFT JOIN player_daily_stats s ON s.user_id = p.user_id AND s.local_date = $1::date
+          WHERE c.server_day = $1::date AND c.online = true
+        ), quota_top AS (
+          SELECT user_id FROM player_rows WHERE quota_value IS NOT NULL ORDER BY quota_value DESC, user_id LIMIT 50
+        ), drop_top AS (
+          SELECT user_id FROM player_rows WHERE NULLIF(state->>'death_drop_coins', '')::numeric IS NOT NULL ORDER BY NULLIF(state->>'death_drop_coins', '')::numeric DESC, user_id LIMIT 50
+        ), income_top AS (
+          SELECT user_id FROM player_rows WHERE income IS NOT NULL ORDER BY income DESC, user_id LIMIT 50
+        ), candidates AS (
+          SELECT user_id FROM quota_top UNION SELECT user_id FROM drop_top UNION SELECT user_id FROM income_top
+        )
+        SELECT pr.* FROM player_rows pr INNER JOIN candidates c ON c.user_id = pr.user_id ORDER BY pr.user_id LIMIT $2`, [latest.server_day, 5_000 + 1]);
+      const rows = limitedRows(result, 'players', HISTORY_ROW_LIMITS.players);
+      return {
+        ...common,
+        players: rows.map(row => rowToPlayer(row, { kills: Number(row.kills || 0), deaths: Number(row.deaths || 0) }, { currentDay: latest.server_day }))
+      };
+    }
+    throw new Error(`unknown realtime resource: ${resource}`);
+  }
+
+  async getRealtimeChat(versionToken = null) { return this.getRealtimeResource('chat', versionToken); }
+  async getRealtimeMap(versionToken = null) { return this.getRealtimeResource('map', versionToken); }
+  async getRealtimePlayers(versionToken = null) { return this.getRealtimeResource('players', versionToken); }
+  async getRealtimeKills(versionToken = null) { return this.getRealtimeResource('kills', versionToken); }
+
+  async getHistoryResource(resource, range) {
+    const latest = await this.getLatestVersion();
+    const latestDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
+    const common = {
+      from: range.from,
+      to: range.to,
+      closedThrough: latestDay && range.to < latestDay ? range.to : null
+    };
+    if (resource === 'chat') {
+      const result = await this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]);
+      return { ...common, messages: limitedRows(result, 'messages', HISTORY_ROW_LIMITS.messages) };
+    }
+    if (resource === 'kills') {
+      const result = await this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]);
+      return { ...common, kills: limitedRows(result, 'kills', HISTORY_ROW_LIMITS.kills) };
+    }
+    if (resource === 'players') {
+      const result = await this.query(`WITH ranged_stats AS (
+          SELECT user_id, SUM(kills)::int AS kills, SUM(deaths)::int AS deaths
+          FROM player_daily_stats WHERE local_date BETWEEN $1::date AND $2::date GROUP BY user_id
+        ), ranged_quota AS (
+          SELECT user_id,
+            (array_agg(initial_quota ORDER BY local_date) FILTER (WHERE initial_quota IS NOT NULL))[1] AS initial_quota,
+            (array_agg(closing_quota ORDER BY local_date DESC) FILTER (WHERE closing_quota IS NOT NULL))[1] AS quota_value,
+            CASE WHEN bool_and(income IS NOT NULL) THEN SUM(income) ELSE NULL END AS income
+          FROM player_daily_quota WHERE local_date BETWEEN $1::date AND $2::date GROUP BY user_id
+        ), player_rows AS (
+          SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
+            c.server_day::text, c.snapshot_id, c.observed_at, c.state,
+            CASE WHEN rq.user_id IS NULL THEN NULL ELSE $1::text END AS quota_day,
+            rq.initial_quota, rq.quota_value, rq.income,
+            rs.kills, rs.deaths,
+            CASE WHEN c.server_day = $3::date THEN NULLIF(c.state->>'death_drop_coins', '')::numeric ELSE NULL END AS current_drop
+          FROM players p
+          LEFT JOIN player_state_current c ON c.user_id = p.user_id
+          LEFT JOIN ranged_quota rq ON rq.user_id = p.user_id
+          LEFT JOIN ranged_stats rs ON rs.user_id = p.user_id
+        ), quota_top AS (
+          SELECT user_id FROM player_rows WHERE quota_value IS NOT NULL ORDER BY quota_value DESC, user_id LIMIT 50
+        ), drop_top AS (
+          SELECT user_id FROM player_rows WHERE current_drop IS NOT NULL ORDER BY current_drop DESC, user_id LIMIT 50
+        ), income_top AS (
+          SELECT user_id FROM player_rows WHERE income IS NOT NULL ORDER BY income DESC, user_id LIMIT 50
+        ), candidates AS (
+          SELECT user_id FROM quota_top UNION SELECT user_id FROM drop_top UNION SELECT user_id FROM income_top
+        )
+        SELECT pr.* FROM player_rows pr INNER JOIN candidates c ON c.user_id = pr.user_id ORDER BY pr.user_id LIMIT $4`, [range.from, range.to, latestDay || range.to, HISTORY_ROW_LIMITS.players + 1]);
+      const rows = limitedRows(result, 'players', HISTORY_ROW_LIMITS.players);
+      return {
+        ...common,
+        players: rows.map(row => rowToPlayer(row, { kills: Number(row.kills || 0), deaths: Number(row.deaths || 0) }, { currentDay: latestDay }))
+          .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin') || a.userId - b.userId)
+      };
+    }
+    throw new Error(`unknown history resource: ${resource}`);
+  }
+
+  async getHistoryChat(range) { return this.getHistoryResource('chat', range); }
+  async getHistoryPlayers(range) { return this.getHistoryResource('players', range); }
+  async getHistoryKills(range) { return this.getHistoryResource('kills', range); }
 
   async applyObservation(body, metadata = {}) {
     const beforeAdjustments = this.engine.quotaAdjustments.length;

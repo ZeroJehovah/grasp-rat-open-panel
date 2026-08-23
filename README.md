@@ -70,7 +70,22 @@ range-limited to at most 62 calendar days, use stable ordering and bounded
 result sets, and are cacheable; an oversized result returns `413` instead of
 being silently truncated. JSON responses over 1 KiB negotiate Brotli, gzip or
 deflate when the client advertises support. Realtime responses use a version
-token and ETag.
+token and ETag. The SPA uses resource-level reads so a tab requests only its
+current dataset:
+
+```text
+/api/v1/realtime/chat     /api/v1/realtime/map
+/api/v1/realtime/players  /api/v1/realtime/kills
+/api/v1/history/chat?from=YYYY-MM-DD&to=YYYY-MM-DD
+/api/v1/history/players?from=YYYY-MM-DD&to=YYYY-MM-DD
+/api/v1/history/kills?from=YYYY-MM-DD&to=YYYY-MM-DD
+```
+
+Each resource response carries `generatedAt`, `timezone`, `schemaVersion` and
+`scope`; realtime resources also carry `versionToken`, while historical
+resources carry `from`, `to` and the applicable closed-through date. The old
+aggregate `/api/v1/realtime` and `/api/v1/history` endpoints remain temporarily
+available as rollback-compatible wrappers.
 Migration `004_date_partitions.sql` keeps the date-keyed fact tables in a
 rolling daily-partition window while retaining a default partition as a safety
 net.

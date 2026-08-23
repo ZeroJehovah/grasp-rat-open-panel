@@ -108,6 +108,9 @@ function observation(engine, value, time) {
   assert.strictEqual(engine.stateDeltas.length, 2);
   assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 100);
   assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 94);
+  const realtimePlayer = engine.getRealtimePlayers().players[0];
+  assert.strictEqual(realtimePlayer.state.invulnerableRemainingSecs, 0);
+  assert.strictEqual(realtimePlayer.state.loss, 2);
   assert.strictEqual(engine.onlineIntervals[0].online_to_snapshot_id, null);
   assert.strictEqual(engine.messages.size, 0);
   assert.strictEqual(engine.verifyRebuild().ok, true);

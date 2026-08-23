@@ -141,6 +141,54 @@ async function buildServer(options = {}) {
     return payload;
   });
 
+  const realtimeResources = ['chat', 'map', 'players', 'kills'];
+  for (const resource of realtimeResources) {
+    const method = `getRealtime${resource[0].toUpperCase()}${resource.slice(1)}`;
+    app.get(`/api/v1/realtime/${resource}`, async (request, reply) => {
+      const payload = envelope(await store[method](parseVersion(request.query)), { scope: 'realtime', resource });
+      const tag = etagFor(stablePayload(payload));
+      reply.header('ETag', tag);
+      reply.header('Cache-Control', 'public, max-age=5, s-maxage=10, stale-while-revalidate=30');
+      reply.header('CDN-Cache-Control', 'public, max-age=10, stale-while-revalidate=30');
+      if (request.headers['if-none-match'] === tag) return reply.code(304).send();
+      return payload;
+    });
+  }
+
+  const historyResources = ['chat', 'players', 'kills'];
+  for (const resource of historyResources) {
+    const method = `getHistory${resource[0].toUpperCase()}${resource.slice(1)}`;
+    app.get(`/api/v1/history/${resource}`, async (request, reply) => {
+      const from = String(request.query?.from || '');
+      const to = String(request.query?.to || '');
+      let range;
+      try { range = businessDateRange(from, to); } catch (error) {
+        return reply.code(400).send({ error: 'invalid_date_range', message: error.message, resource, generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
+      }
+      const meta = await store.getMeta();
+      const availableDates = Array.isArray(meta.availableDates) ? meta.availableDates : null;
+      if (meta.earliestDate && range.from < meta.earliestDate || meta.latestDate && range.to > meta.latestDate || availableDates && !isDateRangeCovered(range, availableDates)) {
+        return reply.code(416).send({ error: 'date_range_unavailable', resource, earliestDate: meta.earliestDate, latestDate: meta.latestDate, generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
+      }
+      let resourcePayload;
+      try {
+        resourcePayload = await store[method](range);
+      } catch (error) {
+        if (error?.code === 'history_result_limit') return historyLimitReply(reply, error.resource, error.limit);
+        throw error;
+      }
+      const payload = envelope(resourcePayload, { scope: 'history', resource, from, to });
+      const isClosed = Boolean(payload.closedThrough && payload.closedThrough >= to);
+      const cache = isClosed ? 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400' : 'public, max-age=5, s-maxage=10, stale-while-revalidate=30';
+      reply.header('Cache-Control', cache);
+      reply.header('CDN-Cache-Control', cache);
+      const tag = etagFor(stablePayload(payload));
+      reply.header('ETag', tag);
+      if (request.headers['if-none-match'] === tag) return reply.code(304).send();
+      return payload;
+    });
+  }
+
   if (options.staticDirectory) {
     try {
       const fastifyStatic = require('@fastify/static');

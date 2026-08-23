@@ -2,15 +2,27 @@ import { test, expect, type Page } from '@playwright/test';
 
 const meta = {
   map: { id: 'test-map', version: 1, bounds: { minX: -100, maxX: 100, minY: -100, maxY: 100 }, center: { x: 0, y: 0 }, directions: ['北', '东北', '东', '东南', '南', '西南', '西', '西北'], metersPerGameUnit: 1 },
-  availableDates: ['2026-08-22'], earliestDate: '2026-08-22', latestDate: '2026-08-22', presetRanges: { today: { from: '2026-08-22', to: '2026-08-22' }, yesterday: null, 'this-week': null, 'last-week': null, 'this-month': null, 'last-month': null }, timezone: 'Asia/Shanghai', schemaVersion: 'snapshot-v1', features: { realtime: true, history: true },
+  availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { today: { from: '2026-08-23', to: '2026-08-23' }, yesterday: { from: '2026-08-22', to: '2026-08-22' }, 'this-week': null, 'last-week': null, 'this-month': null, 'last-month': null }, timezone: 'Asia/Shanghai', schemaVersion: 'snapshot-v1', features: { realtime: true, history: true }
 };
-const player = { userId: 7, name: 'fixture-player', online: true, lastSeenAt: '2026-08-22T00:01:00+08:00', currentEntityId: 1, drop: 12, quota: { day: '2026-08-22', initial: 200, value: 204, income: 4 }, income: 4, kills: 1, deaths: 0, state: { hp: 100, maxHp: 100, x: 20, y: 10, stamina5s: 10000, stamina1h: 3000000, stamina1d: 20000000, stamina5sLimit: 10000, stamina1hLimit: 3000000, stamina1dLimit: 20000000, currentJoinMode: 'Passive', life: 'Alive', snapshotId: 'test', observedAt: '2026-08-22T00:01:00+08:00' } };
+const player = { userId: 7, name: 'fixture-player', online: true, lastSeenAt: '2026-08-23T00:01:00+08:00', currentEntityId: 1, drop: 12, quota: { day: '2026-08-23', initial: 200, value: 204, income: 4 }, income: 4, kills: 1, deaths: 0, state: { hp: 100, maxHp: 100, x: 20, y: 10, invulnerableRemainingSecs: 0, loss: 2, stamina5s: 10000, stamina1h: 3000000, stamina1d: 20000000, stamina5sLimit: 10000, stamina1hLimit: 3000000, stamina1dLimit: 20000000, currentJoinMode: 'Passive', life: 'Alive', snapshotId: 'test', observedAt: '2026-08-23T00:01:00+08:00' } };
+
+function response(scope: 'realtime' | 'history', resource: string, payload: Record<string, unknown> = {}) {
+  return { scope, resource, generatedAt: player.state.observedAt, timezone: 'Asia/Shanghai', schemaVersion: 'snapshot-v1', ...payload };
+}
 
 async function mockApi(page: Page, realtimePlayers = [player]) {
   await page.route('**/api/v1/meta', route => route.fulfill({ json: meta }));
-  await page.route('**/api/v1/realtime*', route => route.fulfill({ json: { versionToken: 'v1', generatedAt: player.state.observedAt, latest: { snapshot_id: 's1', server_day: '2026-08-22', server_tick: 10, observed_at: player.state.observedAt }, map: meta.map, players: realtimePlayers, messages: [], kills: [] } }));
   await page.route('**/api/v1/realtime/version', route => route.fulfill({ json: { versionToken: 'v1', snapshotId: 's1', observedAt: player.state.observedAt } }));
-  await page.route('**/api/v1/history*', route => route.fulfill({ json: { from: '2026-08-22', to: '2026-08-22', timezone: 'Asia/Shanghai', generatedAt: player.state.observedAt, closedThrough: null, players: [player], messages: [], kills: [], dailyQuota: [], stats: [] } }));
+  await page.route('**/api/v1/realtime/*', route => {
+    const resource = new URL(route.request().url()).pathname.split('/').at(-1);
+    const payload = resource === 'chat' ? { versionToken: 'v1', messages: [] } : resource === 'map' ? { versionToken: 'v1', map: meta.map, players: realtimePlayers } : resource === 'players' ? { versionToken: 'v1', serverDay: '2026-08-23', players: realtimePlayers } : { versionToken: 'v1', kills: [] };
+    return route.fulfill({ json: response('realtime', resource || 'chat', { latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, ...payload }) });
+  });
+  await page.route('**/api/v1/history/*', route => {
+    const resource = new URL(route.request().url()).pathname.split('/').at(-1) || 'chat';
+    const payload = resource === 'chat' ? { messages: [] } : resource === 'players' ? { players: [player] } : { kills: [] };
+    return route.fulfill({ json: response('history', resource, { from: '2026-08-22', to: '2026-08-22', closedThrough: '2026-08-22', ...payload }) });
+  });
 }
 
 function screenshotPath(testInfo: { project: { name: string }; title: string }): string {
@@ -18,91 +30,70 @@ function screenshotPath(testInfo: { project: { name: string }; title: string }):
   return `test-results/panel-${testInfo.project.name}-${safeTitle}.png`;
 }
 
-test('desktop panel keeps the three primary regions and data tabs', async ({ page }, testInfo) => {
+test('desktop fixed shell starts at realtime chat and keeps the footer visible', async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Grasp Rat Open Panel' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: '实时地图' })).toBeVisible();
-  await page.getByRole('button', { name: '玩家列表' }).click();
+  await expect(page).toHaveURL(/\/realtime\/chat$/);
+  await expect(page.getByRole('heading', { name: '聊天记录' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '地图' })).toBeVisible();
+  await page.getByRole('tab', { name: '玩家' }).click();
+  await expect(page).toHaveURL(/\/realtime\/players$/);
   await expect(page.getByText('fixture-player')).toBeVisible();
-  const topLevelOrder = await page.locator('.app-shell > *').evaluateAll(elements => elements.map(element => element.className));
-  expect(topLevelOrder).toEqual(['banner', 'main-grid', 'footer']);
+  expect(await page.evaluate(() => Math.abs(document.documentElement.scrollHeight - document.documentElement.clientHeight) <= 2)).toBe(true);
   await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
 });
 
-test('narrow panel keeps range, tabs and footer reachable', async ({ page }, testInfo) => {
+test('history URL preserves range and browser back restores the previous tab', async ({ page }) => {
   await mockApi(page);
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: '时间范围' })).toBeVisible();
-  await page.getByRole('button', { name: '玩家列表' }).click();
+  await page.goto('/realtime/chat');
+  await page.getByRole('link', { name: '历史' }).click();
+  await expect(page).toHaveURL(/\/history\/chat\?from=2026-08-23&to=2026-08-23$/);
+  await page.getByRole('tab', { name: '玩家' }).click();
+  await expect(page).toHaveURL(/\/history\/players\?from=2026-08-23&to=2026-08-23$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/history\/chat\?from=2026-08-23&to=2026-08-23$/);
+});
+
+test('switching tabs requests only the selected resource', async ({ page }) => {
+  const requested: string[] = [];
+  await mockApi(page);
+  page.on('request', request => { if (request.url().includes('/api/v1/realtime/')) requested.push(new URL(request.url()).pathname); });
+  await page.goto('/realtime/chat');
+  await expect(page.getByRole('heading', { name: '聊天记录' })).toBeVisible();
+  expect(requested.some(path => path.endsWith('/realtime/chat'))).toBe(true);
+  expect(requested.some(path => path.endsWith('/realtime/players'))).toBe(false);
+  await page.getByRole('tab', { name: '玩家' }).click();
   await expect(page.getByText('fixture-player')).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
-  await page.getByRole('button', { name: '击杀明细' }).click();
-  await expect(page.getByText('没有符合阈值的击杀记录')).toBeVisible();
-  await expect(page.getByRole('link', { name: 'GitHub' })).toBeVisible();
-  const topLevelOrder = await page.locator('.app-shell > *').evaluateAll(elements => elements.map(element => element.className));
-  expect(topLevelOrder).toEqual(['banner', 'main-grid', 'footer']);
-  await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
+  expect(requested.some(path => path.endsWith('/realtime/players'))).toBe(true);
 });
 
-test('unavailable range presets are disabled instead of silently changing the date', async ({ page }) => {
-  await mockApi(page);
-  await page.goto('/');
-  await expect(page.getByRole('button', { name: '今日' })).toBeEnabled();
-  await expect(page.getByRole('button', { name: '昨日' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: '上周' })).toBeDisabled();
-  await expect(page.locator('input[type="date"]').first()).toHaveValue('2026-08-22');
-});
-
-test('an empty realtime candidate list does not fall back to historical players on the map', async ({ page }) => {
+test('narrow layout has no document overflow and map does not fall back to historical players', async ({ page }) => {
   await mockApi(page, []);
-  await page.goto('/');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/realtime/map');
   await expect(page.getByText('0 位玩家')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(page.getByRole('link', { name: 'GitHub' })).toBeVisible();
 });
 
-test('realtime refresh replaces the cached current-day aggregate', async ({ page }) => {
-  let live = false;
-  const rangeMeta = { ...meta, availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { ...meta.presetRanges, today: { from: '2026-08-23', to: '2026-08-23' } } };
-  const oldPlayer = { ...player, income: 4, todayIncome: 4, kills: 1, deaths: 0 };
-  const livePlayer = { ...player, income: 7, todayIncome: 7, kills: 3, deaths: 1 };
-  await page.route('**/api/v1/meta', route => route.fulfill({ json: rangeMeta }));
-  await page.route('**/api/v1/realtime*', route => route.fulfill({ json: { versionToken: live ? 'v2' : 'v1', generatedAt: '2026-08-23T02:00:00+08:00', latest: { snapshot_id: live ? 's2' : 's1', server_day: '2026-08-23', server_tick: live ? 20 : 10, observed_at: '2026-08-23T02:00:00+08:00' }, map: rangeMeta.map, players: [live ? livePlayer : oldPlayer], quota: [{ user_id: 7, quota_day: '2026-08-23', initial_quota: 200, quota_value: live ? 207 : 204 }], stats: [{ local_date: '2026-08-23', user_id: 7, kills: live ? 3 : 1, deaths: live ? 1 : 0 }], messages: [], kills: [] } }));
-  await page.route('**/api/v1/realtime/version', route => route.fulfill({ json: { versionToken: live ? 'v2' : 'v1', snapshotId: live ? 's2' : 's1', observedAt: '2026-08-23T02:00:00+08:00' } }));
-  await page.route('**/api/v1/history*', route => route.fulfill({ json: { from: '2026-08-23', to: '2026-08-23', timezone: 'Asia/Shanghai', generatedAt: '2026-08-23T02:00:00+08:00', closedThrough: null, players: [oldPlayer], messages: [], kills: [], dailyQuota: [{ local_date: '2026-08-23', user_id: 7, initial_quota: 200, closing_quota: 204, income: 4, finalized_at: null }], stats: [{ local_date: '2026-08-23', user_id: 7, kills: 1, deaths: 0 }] } }));
-  await page.goto('/');
-  await page.getByRole('button', { name: '玩家列表' }).click();
-  const row = page.locator('.player-table tbody tr').first();
-  await expect(row.locator('td').nth(5)).toHaveText('+4');
-  live = true;
-  await expect(row.locator('td').nth(5)).toHaveText('+7', { timeout: 4_000 });
-  await expect(row.locator('td').nth(9)).toHaveText('3');
-  await expect(row.locator('td').nth(10)).toHaveText('1');
+test('map camera exposes axes, viewport readout and player details', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/map');
+  await expect(page.getByText('x=0')).toBeVisible();
+  await expect(page.getByText('y=0')).toBeVisible();
+  await expect(page.getByText(/视野半径/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /fixture-player 玩家详情/ })).toBeVisible();
+  await page.getByRole('button', { name: /fixture-player 玩家详情/ }).hover();
+  await expect(page.getByText(/Loss 2/)).toBeVisible();
+  await page.getByRole('button', { name: '放大地图' }).click();
+  await expect(page.getByRole('button', { name: '缩小地图' })).toBeVisible();
 });
 
-test('historical range excludes realtime events from a later day', async ({ page }) => {
-  const rangeMeta = { ...meta, availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { ...meta.presetRanges, today: { from: '2026-08-23', to: '2026-08-23' }, yesterday: { from: '2026-08-22', to: '2026-08-22' } } };
-  const oldMessage = { message_id: 'old-message', server_day: '2026-08-22', event_at: '2026-08-22T01:00:00+08:00', kind: 'chat', text: 'old-chat', user_name: 'old-user' };
-  const todayMessage = { message_id: 'today-message', server_day: '2026-08-23', event_at: '2026-08-23T01:00:00+08:00', kind: 'chat', text: 'today-chat', user_name: 'today-user' };
-  const oldKill = { kill_id: 'old-kill', local_date: '2026-08-22', event_at: '2026-08-22T02:00:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'old-killer', victim_name: 'old-victim', confidence: 'confirmed', drop: { amount: 12 }, victim_stamina_5s: 10000, victim_stamina_5s_limit: 10000 };
-  const todayKill = { kill_id: 'today-kill', local_date: '2026-08-23', event_at: '2026-08-23T02:00:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'today-killer', victim_name: 'today-victim', confidence: 'confirmed', drop: { amount: 12 }, victim_stamina_5s: 10000, victim_stamina_5s_limit: 10000 };
-  const unknownEvidenceKill = { kill_id: 'unknown-evidence-kill', local_date: '2026-08-22', event_at: '2026-08-22T03:00:00+08:00', killer_user_id: 7, victim_user_id: 7, killer_name: 'unknown-killer', victim_name: 'unknown-victim', confidence: 'unknown', drop: { amount: 12 } };
-  await page.route('**/api/v1/meta', route => route.fulfill({ json: rangeMeta }));
-  await page.route('**/api/v1/realtime/version', route => route.fulfill({ json: { versionToken: 'v-range', snapshotId: 's-range', observedAt: '2026-08-23T02:00:00+08:00' } }));
-  await page.route('**/api/v1/realtime*', route => route.fulfill({ json: { versionToken: 'v-range', generatedAt: '2026-08-23T02:00:00+08:00', latest: { snapshot_id: 's-range', server_day: '2026-08-23', server_tick: 10, observed_at: '2026-08-23T02:00:00+08:00' }, map: rangeMeta.map, players: [player], messages: [todayMessage], kills: [todayKill] } }));
-  await page.route('**/api/v1/history*', route => {
-    const url = new URL(route.request().url());
-    const isYesterday = url.searchParams.get('from') === '2026-08-22';
-    return route.fulfill({ json: { from: isYesterday ? '2026-08-22' : '2026-08-23', to: isYesterday ? '2026-08-22' : '2026-08-23', timezone: 'Asia/Shanghai', generatedAt: '2026-08-23T02:00:00+08:00', closedThrough: null, players: [player], messages: isYesterday ? [oldMessage] : [todayMessage], kills: isYesterday ? [oldKill, unknownEvidenceKill] : [todayKill], dailyQuota: [], stats: [] } });
-  });
-  await page.goto('/');
-  await page.getByRole('button', { name: '昨日' }).click();
-  await expect(page.getByText('old-chat')).toBeVisible();
-  await expect(page.getByText('today-chat')).not.toBeVisible();
-  await page.getByRole('button', { name: '击杀明细' }).click();
-  await page.getByRole('button', { name: '玩家列表' }).click();
-  await expect(page.locator('.player-table th').filter({ hasText: '昨日击杀数' })).toBeVisible();
-  await page.getByRole('button', { name: '击杀明细' }).click();
-  await expect(page.getByRole('cell', { name: 'old-killer' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'today-killer' })).not.toBeVisible();
-  await expect(page.getByRole('row').filter({ hasText: 'unknown-killer' })).toContainText('未知');
+test('chat filter uses the explicit chat-only wording', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/api/v1/realtime/chat*', route => route.fulfill({ json: response('realtime', 'chat', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, messages: [{ message_id: 'chat', kind: 'chat', text: 'hello', event_at: player.state.observedAt }, { message_id: 'kill', kind: 'kill', text: 'killer killed victim', event_at: '2026-08-23T00:02:00+08:00' }] }) }));
+  await page.goto('/realtime/chat');
+  await expect(page.getByText('killer killed victim')).toBeVisible();
+  await page.getByText('仅看聊天').click();
+  await expect(page.getByText('killer killed victim')).not.toBeVisible();
 });

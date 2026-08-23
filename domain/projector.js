@@ -65,6 +65,29 @@ function sortNames(values) {
   return values.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-u-co-pinyin') || Number(a.userId ?? a.user_id) - Number(b.userId ?? b.user_id));
 }
 
+function mapPlayerView(player) {
+  return {
+    userId: player.userId,
+    name: player.name,
+    online: player.online,
+    drop: player.drop,
+    state: player.state ? {
+      hp: player.state.hp,
+      maxHp: player.state.maxHp,
+      x: player.state.x,
+      y: player.state.y,
+      invulnerableRemainingSecs: player.state.invulnerableRemainingSecs,
+      loss: player.state.loss,
+      stamina5s: player.state.stamina5s,
+      stamina1h: player.state.stamina1h,
+      stamina1d: player.state.stamina1d,
+      stamina5sLimit: player.state.stamina5sLimit,
+      stamina1hLimit: player.state.stamina1hLimit,
+      stamina1dLimit: player.state.stamina1dLimit
+    } : null
+  };
+}
+
 function historyQuotaView(row) {
   return {
     local_date: String(row.local_date).slice(0, 10),
@@ -661,7 +684,13 @@ class ProjectionEngine {
     const stats = this.aggregateStats(uid, range);
     const income = this.aggregateIncome(uid, range);
     const todayQuota = this.dailyQuota.get(mapKey(today, uid));
-    const todayIncome = todayQuota && today ? this.aggregateIncome(uid, { from: today, to: today }) : null;
+    const quota = range ? this.aggregateQuota(uid, range) : (todayQuota ? {
+      day: todayQuota.local_date,
+      initial: todayQuota.initial_quota,
+      value: todayQuota.closing_quota,
+      income: todayQuota.income
+    } : null);
+    const todayIncome = todayQuota && today && range?.from === today && range?.to === today ? this.aggregateIncome(uid, { from: today, to: today }) : null;
     const effectiveDrop = today && state?.server_day === today ? numeric(state.death_drop_coins) : null;
     return {
       userId: player.user_id,
@@ -670,12 +699,7 @@ class ProjectionEngine {
       lastSeenAt: player.last_seen_at || null,
       currentEntityId: player.current_entity_id ?? null,
       drop: effectiveDrop,
-      quota: todayQuota ? {
-        day: todayQuota.local_date,
-        initial: todayQuota.initial_quota,
-        value: todayQuota.closing_quota,
-        income: todayQuota.income
-      } : null,
+      quota,
       income,
       todayIncome,
       kills: stats.kills,
@@ -685,6 +709,8 @@ class ProjectionEngine {
         maxHp: state.max_hp,
         x: state.x,
         y: state.y,
+        invulnerableRemainingSecs: numeric(state.invulnerable_remaining_secs),
+        loss: numeric(state.death_loss_preview),
         stamina5s: state.stamina_5s_remaining_milli,
         stamina1h: state.stamina_1h_remaining_milli,
         stamina1d: state.stamina_1d_remaining_milli,
@@ -723,6 +749,24 @@ class ProjectionEngine {
     return computable ? income : null;
   }
 
+  aggregateQuota(uid, range) {
+    const rows = Array.from(this.dailyQuota.values())
+      .filter(daily => userKey(daily.user_id) === uid && daily.local_date >= range.from && daily.local_date <= range.to)
+      .sort((a, b) => String(a.local_date).localeCompare(String(b.local_date)));
+    if (rows.length === 0) return null;
+    let initial = null;
+    let value = null;
+    let income = 0;
+    let computable = true;
+    for (const row of rows) {
+      if (initial === null && row.initial_quota !== null) initial = row.initial_quota;
+      if (row.closing_quota !== null) value = row.closing_quota;
+      if (row.income === null) computable = false;
+      else income += row.income;
+    }
+    return { day: rows.length === 1 ? rows[0].local_date : `${range.from}—${range.to}`, initial, value, income: computable ? income : null };
+  }
+
   selectRealtimeUsers(today) {
     const views = Array.from(this.players.keys()).map(uid => this.currentPlayerView(uid, { from: today, to: today }, today)).filter(Boolean);
     // The realtime map contract is deliberately not the player-list Top50
@@ -733,6 +777,21 @@ class ProjectionEngine {
       const tired = view.state?.stamina1d !== null && view.state?.stamina1dLimit !== null && view.state.stamina1d < view.state.stamina1dLimit;
       return view.online && ((view.drop !== null && view.drop >= 1) || tired);
     });
+  }
+
+  selectRealtimePlayers(today) {
+    const views = Array.from(this.players.keys())
+      .map(uid => this.currentPlayerView(uid, { from: today, to: today }, today))
+      .filter(player => player?.online);
+    const selected = new Set();
+    const top = value => views
+      .filter(player => value(player) !== null && value(player) !== undefined && Number.isFinite(Number(value(player))))
+      .sort((a, b) => Number(value(b)) - Number(value(a)) || String(a.name).localeCompare(String(b.name)) || a.userId - b.userId)
+      .slice(0, 50);
+    for (const player of top(player => player.quota?.value)) selected.add(player.userId);
+    for (const player of top(player => player.drop)) selected.add(player.userId);
+    for (const player of top(player => player.todayIncome ?? player.quota?.income)) selected.add(player.userId);
+    return views.filter(player => selected.has(player.userId));
   }
 
   getRealtime(versionToken = null) {
@@ -779,6 +838,74 @@ class ProjectionEngine {
     };
   }
 
+  getRealtimeResource(resource, versionToken = null) {
+    const version = this.getLatestVersion();
+    if (!version) {
+      const empty = { unchanged: false, versionToken: null, latest: null, serverDay: null };
+      if (resource === 'chat') empty.messages = [];
+      if (resource === 'map') { empty.map = cloneJson(this.mapMetadata); empty.players = []; }
+      if (resource === 'players') empty.players = [];
+      if (resource === 'kills') empty.kills = [];
+      return empty;
+    }
+    if (versionToken && versionToken === version.version_token) return { unchanged: true, versionToken: version.version_token };
+    const latest = cloneJson(version);
+    const common = {
+      versionToken: version.version_token,
+      latest,
+      serverDay: latest?.server_day || null
+    };
+    const today = version.server_day;
+    const messages = () => Array.from(this.messages.values())
+      .filter(message => message.local_date === today)
+      .sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.server_day).localeCompare(String(b.server_day)) || String(a.message_id).localeCompare(String(b.message_id)));
+    const kills = () => Array.from(this.kills.values())
+      .filter(kill => kill.local_date === today)
+      .sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.local_date).localeCompare(String(b.local_date)) || String(a.kill_id).localeCompare(String(b.kill_id)));
+    switch (resource) {
+      case 'chat':
+        return { ...common, messages: cloneJson(messages()) };
+      case 'map':
+        return { ...common, map: cloneJson(this.mapMetadata), players: cloneJson(this.selectRealtimeUsers(today).map(mapPlayerView)) };
+      case 'players':
+        return { ...common, players: latest ? cloneJson(this.selectRealtimePlayers(latest.server_day)) : [] };
+      case 'kills':
+        return { ...common, kills: cloneJson(kills()) };
+      default:
+        throw new Error(`unknown realtime resource: ${resource}`);
+    }
+  }
+
+  getRealtimeChat(versionToken = null) { return this.getRealtimeResource('chat', versionToken); }
+  getRealtimeMap(versionToken = null) { return this.getRealtimeResource('map', versionToken); }
+  getRealtimePlayers(versionToken = null) { return this.getRealtimeResource('players', versionToken); }
+  getRealtimeKills(versionToken = null) { return this.getRealtimeResource('kills', versionToken); }
+
+  getHistoryResource(resource, range) {
+    const messages = Array.from(this.messages.values())
+      .filter(message => message.local_date >= range.from && message.local_date <= range.to)
+      .sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.server_day).localeCompare(String(b.server_day)) || String(a.message_id).localeCompare(String(b.message_id)));
+    const kills = Array.from(this.kills.values())
+      .filter(kill => kill.local_date >= range.from && kill.local_date <= range.to)
+      .sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.local_date).localeCompare(String(b.local_date)) || String(a.kill_id).localeCompare(String(b.kill_id)));
+    const latest = this.lastStableVersion?.server_day || null;
+    const common = { from: range.from, to: range.to, closedThrough: latest && range.to < latest ? range.to : null };
+    switch (resource) {
+      case 'chat':
+        return { ...common, messages: cloneJson(messages) };
+      case 'players':
+        return { ...common, players: cloneJson(sortNames(this.selectHistoryUsers(range, latest))) };
+      case 'kills':
+        return { ...common, kills: cloneJson(kills) };
+      default:
+        throw new Error(`unknown history resource: ${resource}`);
+    }
+  }
+
+  getHistoryChat(range) { return this.getHistoryResource('chat', range); }
+  getHistoryPlayers(range) { return this.getHistoryResource('players', range); }
+  getHistoryKills(range) { return this.getHistoryResource('kills', range); }
+
   selectHistoryUsers(range, today = this.lastStableVersion?.server_day) {
     const views = Array.from(this.players.keys())
       .map(uid => this.currentPlayerView(uid, range, today))
@@ -790,7 +917,7 @@ class ProjectionEngine {
       .slice(0, 50);
     for (const player of top(player => player.quota?.value)) selected.add(player.userId);
     for (const player of top(player => player.drop)) selected.add(player.userId);
-    for (const player of top(player => player.todayIncome)) selected.add(player.userId);
+    for (const player of top(player => player.income)) selected.add(player.userId);
     return views.filter(player => selected.has(player.userId));
   }
 

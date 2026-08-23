@@ -16,6 +16,8 @@ export interface PlayerState {
   maxHp: number | null;
   x: number | null;
   y: number | null;
+  invulnerableRemainingSecs: number | null;
+  loss: number | null;
   stamina5s: number | null;
   stamina1h: number | null;
   stamina1d: number | null;
@@ -48,6 +50,16 @@ export interface Player {
   kills: number;
   deaths: number;
   state: PlayerState | null;
+}
+
+export type MapPlayerState = Pick<PlayerState, 'hp' | 'maxHp' | 'x' | 'y' | 'invulnerableRemainingSecs' | 'loss' | 'stamina5s' | 'stamina1h' | 'stamina1d' | 'stamina5sLimit' | 'stamina1hLimit' | 'stamina1dLimit'>;
+
+export interface MapPlayer {
+  userId: number;
+  name: string;
+  online: boolean;
+  drop: number | null;
+  state: MapPlayerState | null;
 }
 
 export interface Message {
@@ -120,4 +132,23 @@ export interface HistoryResponse {
   kills: Kill[];
   dailyQuota: unknown[];
   stats: unknown[];
+}
+
+export interface ResourceResponse {
+  scope: 'realtime' | 'history';
+  resource: 'chat' | 'map' | 'players' | 'kills';
+  generatedAt: string;
+  timezone: string;
+  schemaVersion: string;
+  versionToken?: string | null;
+  serverDay?: string | null;
+  latest?: { snapshot_id: string; server_day: string; server_tick: number; observed_at: string } | null;
+  from?: string;
+  to?: string;
+  closedThrough?: string | null;
+  unchanged?: boolean;
+  map?: MapMetadata;
+  players?: Player[] | MapPlayer[];
+  messages?: Message[];
+  kills?: Kill[];
 }

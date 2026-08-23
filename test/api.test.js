@@ -5,7 +5,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { ProjectionEngine } = require('../domain/projector');
 const { buildServer } = require('../api/server');
-const { rowToPlayer } = require('../storage/postgres-store');
+const { PostgresPanelStore, rowToPlayer } = require('../storage/postgres-store');
 
 const nullDropPlayer = rowToPlayer({
   user_id: 7,
@@ -15,6 +15,15 @@ const nullDropPlayer = rowToPlayer({
   state: { death_drop_coins: null }
 }, { kills: 0, deaths: 0 }, { currentDay: '2026-08-22' });
 assert.strictEqual(nullDropPlayer.drop, null);
+const mappedDetailPlayer = rowToPlayer({
+  user_id: 8,
+  current_name: 'detail-player',
+  online: true,
+  server_day: '2026-08-22',
+  state: { invulnerable_remaining_secs: 12, death_loss_preview: 3 }
+}, { kills: 0, deaths: 0 }, { currentDay: '2026-08-22' });
+assert.strictEqual(mappedDetailPlayer.state.invulnerableRemainingSecs, 12);
+assert.strictEqual(mappedDetailPlayer.state.loss, 3);
 
 function fixture() {
   const fields = {
@@ -49,6 +58,26 @@ function fixture() {
   assert.strictEqual(cached.statusCode, 304);
   const unchanged = await app.inject({ method: 'GET', url: `/api/v1/realtime?version=${encodeURIComponent(realtime.json().versionToken)}` });
   assert.strictEqual(unchanged.json().unchanged, true);
+  const realtimeResources = {
+    chat: ['messages'],
+    map: ['map', 'players'],
+    players: ['players'],
+    kills: ['kills']
+  };
+  for (const [resource, allowedArrays] of Object.entries(realtimeResources)) {
+    const response = await app.inject({ method: 'GET', url: `/api/v1/realtime/${resource}` });
+    assert.strictEqual(response.statusCode, 200);
+    assert.strictEqual(response.json().scope, 'realtime');
+    assert.strictEqual(response.json().resource, resource);
+    for (const field of ['players', 'messages', 'kills']) {
+      if (!allowedArrays.includes(field)) assert.strictEqual(Object.prototype.hasOwnProperty.call(response.json(), field), false, `${resource} leaked ${field}`);
+    }
+    if (resource === 'map') assert.deepStrictEqual(Object.keys(response.json().players[0]).sort(), ['drop', 'name', 'online', 'state', 'userId']);
+    const resourceCached = await app.inject({ method: 'GET', url: `/api/v1/realtime/${resource}`, headers: { 'if-none-match': response.headers.etag } });
+    assert.strictEqual(resourceCached.statusCode, 304);
+    const unchangedResource = await app.inject({ method: 'GET', url: `/api/v1/realtime/${resource}?version=${encodeURIComponent(response.json().versionToken)}` });
+    assert.strictEqual(unchangedResource.json().unchanged, true);
+  }
   const invalidDate = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-02-30&to=2026-02-30' });
   assert.strictEqual(invalidDate.statusCode, 400);
   const tooLong = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-06-21&to=2026-08-22' });
@@ -56,6 +85,34 @@ function fixture() {
   const history = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22' });
   assert.strictEqual(history.statusCode, 200);
   assert.strictEqual(history.json().from, '2026-08-22');
+  for (const resource of ['chat', 'players', 'kills']) {
+    const response = await app.inject({ method: 'GET', url: `/api/v1/history/${resource}?from=2026-08-22&to=2026-08-22` });
+    assert.strictEqual(response.statusCode, 200);
+    assert.strictEqual(response.json().scope, 'history');
+    assert.strictEqual(response.json().resource, resource);
+    const expectedField = resource === 'chat' ? 'messages' : resource;
+    assert.deepStrictEqual(Object.keys(response.json()).filter(key => ['messages', 'players', 'kills'].includes(key)), [expectedField]);
+  }
+  const postgresCalls = [];
+  const fakePool = {
+    query: async (text, values) => {
+      postgresCalls.push({ text, values });
+      if (text.includes('FROM snapshot_versions WHERE completeness')) return { rows: [{ snapshot_id: 'pg-s1', version_token: 'pg-v1', server_day: '2026-08-22', server_tick: 1, observed_at: '2026-08-22T00:00:00.000Z' }] };
+      if (text.includes('FROM map_metadata')) return { rows: [{ payload: { id: 'pg-map', version: 1, bounds: { minX: -1, maxX: 1, minY: -1, maxY: 1 }, center: { x: 0, y: 0 }, directions: [], metersPerGameUnit: 1 } }] };
+      return { rows: [] };
+    }
+  };
+  const postgresStore = new PostgresPanelStore({ pool: fakePool, engine: new ProjectionEngine({ minSteadyEntities: 1 }) });
+  await postgresStore.getRealtimeChat('old-token');
+  await postgresStore.getRealtimeMap('old-token');
+  await postgresStore.getRealtimePlayers('old-token');
+  await postgresStore.getRealtimeKills('old-token');
+  await postgresStore.getHistoryChat({ from: '2026-08-22', to: '2026-08-22' });
+  await postgresStore.getHistoryPlayers({ from: '2026-08-22', to: '2026-08-22' });
+  await postgresStore.getHistoryKills({ from: '2026-08-22', to: '2026-08-22' });
+  assert.ok(postgresCalls.some(call => call.text.includes('message_events') && call.values?.[0] === '2026-08-22'));
+  assert.ok(postgresCalls.some(call => call.text.includes('kill_events') && call.values?.[0] === '2026-08-22'));
+  assert.ok(postgresCalls.some(call => call.text.includes('ranged_quota') && call.values?.[0] === '2026-08-22' && call.values?.[1] === '2026-08-22'));
   const staticApp = await buildServer({ store, staticDirectory: path.resolve(__dirname, '../frontend'), requireStatic: true });
   const staticAsset = await staticApp.inject({ method: 'GET', url: '/src/App.tsx' });
   assert.strictEqual(staticAsset.statusCode, 200);
