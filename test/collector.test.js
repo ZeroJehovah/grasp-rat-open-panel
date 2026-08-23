@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { collectorHealth } = require('../collector/health');
+const { collectorHealth, rawRetentionBacklog } = require('../collector/health');
 const { EgressScheduler } = require('../collector/egress');
 const { DurableObservationQueue } = require('../collector/queue');
 const { collectOnce, parseArgs, runCollector, runRound, benchmarkSelection } = require('../snapshot-collector');
@@ -56,6 +56,22 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   scheduler.markResult(inactive, { statusCode: 200, body: Buffer.from('{}'), payloadHash: 'inactive-probe-ok' }, 1);
   assert.strictEqual(inactiveState.probe_required, false);
   assert.deepStrictEqual([...scheduler.runtimePoolIds()].sort(), ['A2', 'A3', 'B2', 'B3']);
+
+  const migratedStatePath = path.join(tempDir(), 'migrated-state.json');
+  fs.writeFileSync(migratedStatePath, JSON.stringify({
+    egresses: { stale: { id: 'stale', group: 'A' }, A1: { id: 'A1', group: 'A' } },
+    activeEgressIds: ['stale'],
+    runtimeActiveEgressIds: ['stale']
+  }));
+  new EgressScheduler({
+    statePath: migratedStatePath,
+    egresses: candidates,
+    egressPlan: { dailyBenchmark: true, selection: { mode: 'daily-fastest', activePerGroup: 2, activeCount: 4 } }
+  });
+  const migratedState = JSON.parse(fs.readFileSync(migratedStatePath, 'utf8'));
+  assert.deepStrictEqual(Object.keys(migratedState.egresses).sort(), candidates.map(item => item.id).sort());
+  assert.deepStrictEqual(migratedState.activeEgressIds, []);
+  assert.deepStrictEqual(migratedState.runtimeActiveEgressIds, []);
   console.log('daily egress benchmark and runtime rotation tests passed');
 })();
 
@@ -77,6 +93,16 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   const queue = new DurableObservationQueue(path.join(root, 'queue'));
   const outputDir = path.join(root, 'raw');
   fs.mkdirSync(outputDir, { recursive: true });
+  const now = Date.parse('2026-08-23T12:00:00.000Z');
+  const oldBin = path.join(outputDir, 'old-response.bin');
+  const recentJson = path.join(outputDir, 'recent-response.json');
+  fs.writeFileSync(oldBin, 'old');
+  fs.writeFileSync(recentJson, 'recent');
+  fs.writeFileSync(path.join(outputDir, 'manifest.jsonl'), [
+    { observationId: 'old', observedAt: '2026-08-21T12:00:00.000Z', file: 'old-response.bin', storedAsSnapshot: true },
+    { observationId: 'recent', observedAt: '2026-08-23T11:59:00.000Z', file: 'recent-response.json', storedAsSnapshot: true }
+  ].map(item => JSON.stringify(item)).join('\n') + '\n');
+  assert.deepStrictEqual(rawRetentionBacklog(outputDir, now), { count: 1, bytes: 3 });
   const options = parseArgs(['--once', '--output-dir', outputDir]);
   const failed = await collectOnce(options, {
     queue,

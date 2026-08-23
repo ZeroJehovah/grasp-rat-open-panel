@@ -130,13 +130,19 @@ class EgressScheduler {
     };
     this.state = readJson(this.statePath, initial);
     if (!this.state.egresses || typeof this.state.egresses !== 'object') this.state = initial;
+    const configuredIds = new Set(this.egresses.map(egress => egress.id));
+    for (const id of Object.keys(this.state.egresses)) {
+      if (!configuredIds.has(id)) delete this.state.egresses[id];
+    }
     if (!this.state.nextGroup) this.state.nextGroup = 'A';
     if (!Array.isArray(this.state.activeEgressIds)) this.state.activeEgressIds = [];
+    this.state.activeEgressIds = this.state.activeEgressIds.filter(id => configuredIds.has(id));
     if (!Array.isArray(this.state.runtimeActiveEgressIds)) {
       this.state.runtimeActiveEgressIds = this.dailyBenchmark
         ? this.state.activeEgressIds.slice()
         : this.egresses.map(egress => egress.id);
     }
+    this.state.runtimeActiveEgressIds = this.state.runtimeActiveEgressIds.filter(id => configuredIds.has(id));
     for (const egress of this.egresses) {
       if (!this.state.egresses[egress.id]) this.state.egresses[egress.id] = {
         id: egress.id,

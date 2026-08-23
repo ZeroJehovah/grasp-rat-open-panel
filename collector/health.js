@@ -20,11 +20,26 @@ function readState(filePath) {
 function rawRetentionBacklog(directory, now = Date.now()) {
   let count = 0;
   let bytes = 0;
+  const cutoff = now - 24 * 60 * 60 * 1000;
+  const observedAtByFile = new Map();
   try {
-    for (const file of fs.readdirSync(directory).filter(name => name.endsWith('.json') && name !== 'manifest.jsonl')) {
+    const manifestPath = path.join(directory, 'manifest.jsonl');
+    if (fs.existsSync(manifestPath)) {
+      for (const line of fs.readFileSync(manifestPath, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const record = JSON.parse(line);
+          const file = typeof record.file === 'string' ? path.basename(record.file) : '';
+          const observedAt = Date.parse(record.observedAt || record.observed_at || '');
+          if (file && record.storedAsSnapshot !== false && Number.isFinite(observedAt)) observedAtByFile.set(file, observedAt);
+        } catch (_) { /* a partial manifest line must not break health reporting */ }
+      }
+    }
+    for (const file of fs.readdirSync(directory).filter(name => name.endsWith('.json') || name.endsWith('.bin'))) {
       const filePath = path.join(directory, file);
       const stat = fs.statSync(filePath);
-      if (stat.mtimeMs < now - 24 * 60 * 60 * 1000) {
+      const observedAt = observedAtByFile.get(file);
+      if ((Number.isFinite(observedAt) ? observedAt : stat.mtimeMs) < cutoff) {
         count += 1;
         bytes += Number(stat.size || 0);
       }
