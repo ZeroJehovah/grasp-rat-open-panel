@@ -15,9 +15,11 @@ snapshot collector (A1/A2 + B1/B2, 15s single-flight)
   -> React/Vite SPA
 ```
 
-Successful snapshot response bodies are written byte-for-byte. Invalid HTTP
-responses are represented only by observation metadata. The queue writes a
-temporary file, fsyncs it, and renames it before making the item processable.
+Successful HTTP response bodies are written byte-for-byte. Non-success HTTP
+responses are represented only by observation metadata; a successful but
+schema-invalid 2xx body is retained as a `.bin` audit body and queued as an
+invalid observation. The queue writes a temporary file, fsyncs it, and renames
+it before making the item processable.
 The validator distinguishes `steady`, `warming_up`, and `invalid`; incomplete
 versions never bulk-close online intervals.
 
@@ -56,5 +58,6 @@ existing CPAMP management service on port `18317` on the deployment host.
 
 `/api/v1/realtime/version` is always `no-store`. Historical responses are
 range-limited and cacheable; realtime responses use a version token and ETag.
-The retention command removes raw bodies only after a processed queue marker is
-present and keeps observation metadata for at least 62 days.
+The retention command removes raw bodies only after the PostgreSQL structured
+retention checkpoint and daily finalization succeed, and keeps observation
+metadata for at least 62 days.

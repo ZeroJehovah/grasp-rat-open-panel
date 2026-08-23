@@ -50,23 +50,24 @@ function runRetention(options) {
     for (const file of fs.readdirSync(processedDir).filter(name => name.endsWith('.json'))) {
       try {
         const item = JSON.parse(fs.readFileSync(path.join(processedDir, file), 'utf8'));
-        if (item.observationId && ['projected', 'warming_up', 'duplicate'].includes(item.parseStatus || item.status)) committed.add(item.observationId);
+        if (item.observationId && ['projected', 'warming_up', 'invalid', 'duplicate'].includes(item.parseStatus || item.status)) committed.add(item.observationId);
       } catch (_) { /* a partial queue metadata file is not proof of commit */ }
     }
   }
   const rawCutoff = options.now.getTime() - options.rawHours * 60 * 60 * 1000;
   const metadataCutoff = options.now.getTime() - options.metadataDays * 24 * 60 * 60 * 1000;
+  const rawDeletionAllowed = options.allowRawDeletion !== false;
   let eligible = 0;
   let deleted = 0;
   let skippedNotCommitted = 0;
   const errors = [];
-  for (const record of records) {
+  for (const record of rawDeletionAllowed ? records : []) {
     const observedAt = Date.parse(record.observedAt || record.observed_at || '');
     if (!record.file || !record.storedAsSnapshot || !Number.isFinite(observedAt) || observedAt >= rawCutoff) continue;
     eligible += 1;
     // A projector marks queue metadata as committed. Legacy raw runs without this
     // marker are retained deliberately so cleanup cannot outrun structured facts.
-    const isCommitted = ['projected', 'duplicate', 'warming_up'].includes(record.parseStatus) || committed.has(record.observationId);
+    const isCommitted = ['projected', 'duplicate', 'warming_up', 'invalid'].includes(record.parseStatus) || committed.has(record.observationId);
     if (!isCommitted) {
       skippedNotCommitted += 1;
       continue;
@@ -79,19 +80,19 @@ function runRetention(options) {
       if (error.code !== 'ENOENT') errors.push({ file: record.file, error: error.message });
     }
   }
-  const metadataRecords = records.filter(record => {
+  const metadataRecords = rawDeletionAllowed ? records.filter(record => {
     const observedAt = Date.parse(record.observedAt || record.observed_at || '');
     return !Number.isFinite(observedAt) || observedAt >= metadataCutoff;
-  });
+  }) : records;
   let processedBodiesDeleted = 0;
   let processedMetadataDeleted = 0;
-  if (fs.existsSync(processedDir)) {
+  if (rawDeletionAllowed && fs.existsSync(processedDir)) {
     for (const file of fs.readdirSync(processedDir).filter(name => name.endsWith('.json'))) {
       const metadataPath = path.join(processedDir, file);
       let item;
       try { item = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch (_) { continue; }
       const observedAt = Date.parse(item.observedAt || item.observed_at || observedAtByObservationId.get(item.observationId) || '');
-      const committed = ['projected', 'warming_up', 'duplicate'].includes(item.parseStatus || item.status);
+      const committed = ['projected', 'warming_up', 'invalid', 'duplicate'].includes(item.parseStatus || item.status);
       if (committed && Number.isFinite(observedAt) && observedAt < rawCutoff) {
         const bodyPath = path.join(processedDir, file.replace(/\.json$/, '.body'));
         try { if (!options.dryRun) fs.unlinkSync(bodyPath); processedBodiesDeleted += 1; } catch (error) { if (error.code !== 'ENOENT') errors.push({ file: path.basename(bodyPath), error: error.message }); }
@@ -103,10 +104,16 @@ function runRetention(options) {
   }
   if (!options.dryRun && fs.existsSync(manifestPath) && metadataRecords.length !== records.length) {
     const temp = `${manifestPath}.${process.pid}.tmp`;
-    fs.writeFileSync(temp, metadataRecords.map(record => JSON.stringify(record)).join('\n') + (metadataRecords.length ? '\n' : ''), { mode: 0o600 });
+    const fd = fs.openSync(temp, 'w', 0o600);
+    try {
+      fs.writeSync(fd, metadataRecords.map(record => JSON.stringify(record)).join('\n') + (metadataRecords.length ? '\n' : ''), null, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(temp, manifestPath);
   }
-  return { rawCutoff: new Date(rawCutoff).toISOString(), metadataCutoff: new Date(metadataCutoff).toISOString(), eligible, deleted, skippedNotCommitted, processedBodiesDeleted, processedMetadataDeleted, metadataRemaining: metadataRecords.length, errors, dryRun: options.dryRun };
+  return { rawCutoff: new Date(rawCutoff).toISOString(), metadataCutoff: new Date(metadataCutoff).toISOString(), eligible, deleted, skippedNotCommitted, processedBodiesDeleted, processedMetadataDeleted, metadataRemaining: metadataRecords.length, errors, dryRun: options.dryRun, rawDeletionAllowed };
 }
 
 function businessDate(timestamp) {
@@ -163,7 +170,11 @@ if (require.main === module) {
    try {
     const options = parseArgs(process.argv.slice(2));
     if (options.help) console.log('Usage: node commands/retention.js [--raw-dir DIR] [--raw-hours 24] [--metadata-days 62] [--dry-run]');
-    else console.log(JSON.stringify({ type: 'retention-finished', raw: runRetention(options), database: await runDatabaseRetention(options) }, null, 2));
+    else {
+      const database = await runDatabaseRetention(options);
+      const raw = runRetention({ ...options, allowRawDeletion: Boolean(process.env.DATABASE_URL) && (!database.skipped || options.dryRun) });
+      console.log(JSON.stringify({ type: 'retention-finished', raw, database }, null, 2));
+    }
    } catch (error) {
     console.error(error?.stack || error);
     process.exitCode = 1;

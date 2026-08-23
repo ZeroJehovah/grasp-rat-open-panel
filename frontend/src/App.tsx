@@ -41,6 +41,18 @@ function formatTime(value?: string | null): string {
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
 }
 
+function eventDay(event: { event_at?: string; eventAt?: string; local_date?: string; server_day?: string }): string | null {
+  const explicit = event.local_date || event.server_day;
+  if (explicit) return explicit.slice(0, 10);
+  const timestamp = Date.parse(event.event_at || event.eventAt || '');
+  return Number.isNaN(timestamp) ? null : localDate(new Date(timestamp));
+}
+
+function eventInRange(event: { event_at?: string; eventAt?: string; local_date?: string; server_day?: string }, range: { from: string; to: string }): boolean {
+  const day = eventDay(event);
+  return Boolean(day && day >= range.from && day <= range.to);
+}
+
 function formatAgo(value: string | null): string {
   if (!value) return '--前在线';
   const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
@@ -63,6 +75,7 @@ function storageNumber(key: string, fallback: number): number {
 
 function usePanelData(meta: MetaResponse | null, range: { from: string; to: string }) {
   const [realtime, setRealtime] = useState<RealtimeResponse | null>(null);
+  const [realtimeUpdatedAt, setRealtimeUpdatedAt] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryResponse | null>(null);
   const [versionError, setVersionError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -73,6 +86,7 @@ function usePanelData(meta: MetaResponse | null, range: { from: string; to: stri
     const controller = new AbortController();
     setLoadingHistory(true);
     setHistoryError(null);
+    setHistory(null);
     getHistory(range.from, range.to, controller.signal)
       .then(setHistory)
       .catch(error => { if (error.name !== 'AbortError') setHistoryError(error.message); })
@@ -89,18 +103,22 @@ function usePanelData(meta: MetaResponse | null, range: { from: string; to: stri
         setVersionError(null);
         if (!realtime || version.versionToken !== realtime.versionToken) {
           const next = await getRealtime(realtime?.versionToken || null);
-          if (!disposed && !next.unchanged) setRealtime(next);
+          if (!disposed && !next.unchanged) {
+            setRealtime(next);
+            setRealtimeUpdatedAt(new Date().toISOString());
+          }
         }
       } catch (error) {
         if (!disposed) setVersionError(error instanceof Error ? error.message : String(error));
       }
     };
     poll();
-    const interval = window.setInterval(poll, 10_000);
+    const pollMs = Number(import.meta.env.VITE_REALTIME_POLL_MS || 10_000);
+    const interval = window.setInterval(poll, Number.isFinite(pollMs) && pollMs >= 1_000 ? pollMs : 10_000);
     return () => { disposed = true; window.clearInterval(interval); };
   }, [realtime]);
 
-  return { realtime, history, versionError, historyError, loadingHistory };
+  return { realtime, realtimeUpdatedAt, history, versionError, historyError, loadingHistory };
 }
 
 function Banner({ theme, onTheme }: { theme: 'light' | 'dark'; onTheme: () => void }) {
@@ -271,8 +289,8 @@ function MainPanel({ realtime, history, meta, range, loading }: { realtime: Real
   historyPlayers.forEach(player => playerMap.set(player.userId, player));
   realtimePlayers.forEach(player => { const old = playerMap.get(player.userId); playerMap.set(player.userId, old ? { ...old, ...player, income: old.income, kills: old.kills, deaths: old.deaths } : player); });
   const players = playerCandidates([...playerMap.values()]);
-  const messages = mergeById<Message>(history?.messages || [], realtime?.messages || [], 'message_id');
-  const kills = mergeById<Kill>(history?.kills || [], realtime?.kills || [], 'kill_id');
+  const messages = mergeById<Message>(history?.messages || [], realtime?.messages || [], 'message_id').filter(message => eventInRange(message, range));
+  const kills = mergeById<Kill>(history?.kills || [], realtime?.kills || [], 'kill_id').filter(kill => eventInRange(kill, range));
   const rangeLabel = range.from === range.to ? (range.to === latest ? '今日' : range.to) : `${range.from}—${range.to}`;
   return <main className="main-grid"><aside className="left-rail"><RangeControls meta={meta} /><ChatPanel messages={messages} /></aside><section className="right-field"><nav className="tabs" aria-label="面板视图"><button className={tab === 'map' ? 'tab active' : 'tab'} onClick={() => setTab('map')}><MapIcon size={15} />实时地图</button><button className={tab === 'players' ? 'tab active' : 'tab'} onClick={() => setTab('players')}><Users size={15} />玩家列表</button><button className={tab === 'kills' ? 'tab active' : 'tab'} onClick={() => setTab('kills')}><Swords size={15} />击杀明细</button><span className="tab-status">{loading ? <><RefreshCw size={13} className="spin" />同步历史</> : <><span className="status-dot" />{realtime ? `v${realtime.latest?.server_tick ?? '--'}` : '等待快照'}</>}</span></nav>{tab === 'map' && <MapView players={realtimePlayers.length ? realtimePlayers : players.filter(player => player.online)} map={realtime?.map || meta.map} />}{tab === 'players' && <section className="players-panel panel-block"><div className="section-heading"><div><p className="eyebrow">RANKED CURRENT STATE</p><h2>玩家列表</h2></div><span className="result-count">{players.length} 位玩家</span></div><PlayersTable players={players} map={meta.map} rangeLabel={rangeLabel} /></section>}{tab === 'kills' && <KillTable kills={kills} players={players} map={meta.map} />}</section></main>;
 }
@@ -289,5 +307,6 @@ export default function App() {
   useEffect(() => { const controller = new AbortController(); getMeta(controller.signal).then(value => { setMeta(value); if (!rangeStore.getSnapshot().from && value.latestDate) rangeStore.set({ preset: 'today', ...rangeForPreset('today', value.latestDate) }); }).catch(error => { if (error.name !== 'AbortError') setMetaError(error.message); }); return () => controller.abort(); }, []);
   const range = useRangeStore();
   const data = usePanelData(meta, range);
-  return <div className="app-shell"><Banner theme={theme} onTheme={() => setTheme(value => value === 'light' ? 'dark' : 'light')} /><div className="global-status">{metaError ? <><CircleAlert size={14} />元数据加载失败：{metaError}</> : data.versionError ? <><CircleAlert size={14} />实时版本检查失败，保留旧缓存</> : data.historyError ? <><CircleAlert size={14} />历史数据暂不可用，实时视图仍可用</> : <><span className="status-dot" />服务运行中 · {meta?.timezone || 'Asia/Shanghai'}</>}</div>{meta ? <MainPanel realtime={data.realtime} history={data.history} meta={meta} range={range} loading={data.loadingHistory} /> : <main className="loading-screen"><RefreshCw className="spin" size={20} /><span>正在连接观测数据…</span></main>}<Footer /></div>;
+  const realtimeAge = data.realtimeUpdatedAt ? ` · 最近更新 ${formatTime(data.realtimeUpdatedAt)}` : '';
+  return <div className="app-shell"><Banner theme={theme} onTheme={() => setTheme(value => value === 'light' ? 'dark' : 'light')} /><div className="global-status">{metaError ? <><CircleAlert size={14} />元数据加载失败：{metaError}</> : data.versionError ? <><CircleAlert size={14} />实时版本检查失败，显示旧缓存{realtimeAge}</> : data.historyError ? <><CircleAlert size={14} />历史数据暂不可用，实时视图仍可用{realtimeAge}</> : <><span className="status-dot" />服务运行中 · {meta?.timezone || 'Asia/Shanghai'}{realtimeAge}</>}</div>{meta ? <MainPanel realtime={data.realtime} history={data.history} meta={meta} range={range} loading={data.loadingHistory} /> : <main className="loading-screen"><RefreshCw className="spin" size={20} /><span>正在连接观测数据…</span></main>}<Footer /></div>;
 }

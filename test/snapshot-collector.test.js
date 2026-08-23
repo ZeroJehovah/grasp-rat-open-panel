@@ -10,6 +10,7 @@ const {
   collectOnce,
   runCollector
 } = require('../snapshot-collector');
+const { DurableObservationQueue } = require('../collector/queue');
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-rat-panel-'));
@@ -50,6 +51,29 @@ assert.deepStrictEqual(safeSnapshotSummary(payload), {
   assert.strictEqual(files.length, 1);
   assert.deepStrictEqual(fs.readFileSync(path.join(outputDir, files[0])), payload);
   assert.strictEqual(fs.readFileSync(path.join(outputDir, 'manifest.jsonl'), 'utf8').trim().length > 0, true);
+
+  const invalidDir = tempDir();
+  const invalidQueue = new DurableObservationQueue(path.join(invalidDir, 'queue'));
+  const invalidBody = Buffer.from('not-json');
+  const invalid = await collectOnce(parseArgs(['--once', '--output-dir', invalidDir]), {
+    queue: invalidQueue,
+    now: () => 1_700_000_000_100,
+    requestSnapshot: async () => ({ statusCode: 200, body: invalidBody, durationMs: 3 })
+  });
+  assert.strictEqual(invalid.ok, false);
+  assert.deepStrictEqual(fs.readFileSync(path.join(invalidDir, fs.readdirSync(invalidDir).find(file => file.endsWith('.bin')))), invalidBody);
+  assert.strictEqual(invalidQueue.status().pending, 1);
+
+  const failedDir = tempDir();
+  const failedQueue = new DurableObservationQueue(path.join(failedDir, 'queue'));
+  const failed = await collectOnce(parseArgs(['--once', '--output-dir', failedDir]), {
+    queue: failedQueue,
+    now: () => 1_700_000_000_200,
+    requestSnapshot: async () => ({ statusCode: 403, body: Buffer.from('captcha'), durationMs: 4 })
+  });
+  assert.strictEqual(failed.ok, false);
+  assert.strictEqual(fs.readdirSync(failedDir).filter(file => file !== 'manifest.jsonl').length, 1);
+  assert.strictEqual(failedQueue.status().pending, 1);
 
   let now = 0;
   let calls = 0;

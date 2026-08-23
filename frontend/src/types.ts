@@ -68,6 +68,7 @@ export interface Kill {
   kill_id?: string;
   killId?: string;
   local_date?: string;
+  server_day?: string;
   event_at?: string;
   eventAt?: string;
   killer_user_id?: number | null;

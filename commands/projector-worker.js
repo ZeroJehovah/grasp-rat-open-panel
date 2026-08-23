@@ -23,6 +23,8 @@ async function run() {
       bytes: item.bytes,
       statusCode: item.statusCode,
       durationMs: item.durationMs,
+      error: item.error,
+      parseStatus: item.parseStatus,
       egressId: item.egressId,
       egressGroup: item.egressGroup,
       retryNo: item.retryNo

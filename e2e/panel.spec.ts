@@ -32,3 +32,26 @@ test('narrow panel keeps range, tabs and footer reachable', async ({ page }) => 
   await expect(page.getByRole('link', { name: 'GitHub' })).toBeVisible();
   await page.screenshot({ path: 'test-results/panel-narrow.png', fullPage: true });
 });
+
+test('historical range excludes realtime events from a later day', async ({ page }) => {
+  const rangeMeta = { ...meta, availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23' };
+  const oldMessage = { message_id: 'old-message', server_day: '2026-08-22', event_at: '2026-08-22T01:00:00+08:00', kind: 'chat', text: 'old-chat', user_name: 'old-user' };
+  const todayMessage = { message_id: 'today-message', server_day: '2026-08-23', event_at: '2026-08-23T01:00:00+08:00', kind: 'chat', text: 'today-chat', user_name: 'today-user' };
+  const oldKill = { kill_id: 'old-kill', local_date: '2026-08-22', event_at: '2026-08-22T02:00:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'old-killer', victim_name: 'old-victim', confidence: 'confirmed', drop: { amount: 12 }, victim_stamina_5s: 10000, victim_stamina_5s_limit: 10000 };
+  const todayKill = { kill_id: 'today-kill', local_date: '2026-08-23', event_at: '2026-08-23T02:00:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'today-killer', victim_name: 'today-victim', confidence: 'confirmed', drop: { amount: 12 }, victim_stamina_5s: 10000, victim_stamina_5s_limit: 10000 };
+  await page.route('**/api/v1/meta', route => route.fulfill({ json: rangeMeta }));
+  await page.route('**/api/v1/realtime/version', route => route.fulfill({ json: { versionToken: 'v-range', snapshotId: 's-range', observedAt: '2026-08-23T02:00:00+08:00' } }));
+  await page.route('**/api/v1/realtime*', route => route.fulfill({ json: { versionToken: 'v-range', generatedAt: '2026-08-23T02:00:00+08:00', latest: { snapshot_id: 's-range', server_day: '2026-08-23', server_tick: 10, observed_at: '2026-08-23T02:00:00+08:00' }, map: rangeMeta.map, players: [player], messages: [todayMessage], kills: [todayKill] } }));
+  await page.route('**/api/v1/history*', route => {
+    const url = new URL(route.request().url());
+    const isYesterday = url.searchParams.get('from') === '2026-08-22';
+    return route.fulfill({ json: { from: isYesterday ? '2026-08-22' : '2026-08-23', to: isYesterday ? '2026-08-22' : '2026-08-23', timezone: 'Asia/Shanghai', generatedAt: '2026-08-23T02:00:00+08:00', closedThrough: null, players: [player], messages: isYesterday ? [oldMessage] : [todayMessage], kills: isYesterday ? [oldKill] : [todayKill], dailyQuota: [], stats: [] } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: '昨日' }).click();
+  await expect(page.getByText('old-chat')).toBeVisible();
+  await expect(page.getByText('today-chat')).not.toBeVisible();
+  await page.getByRole('button', { name: '击杀明细' }).click();
+  await expect(page.getByRole('cell', { name: 'old-killer' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'today-killer' })).not.toBeVisible();
+});

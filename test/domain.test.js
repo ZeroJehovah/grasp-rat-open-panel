@@ -92,10 +92,37 @@ function observation(engine, value, time) {
   assert.strictEqual(engine.versions.length, 3);
   assert.strictEqual(engine.stateBases.length, 1);
   assert.strictEqual(engine.stateDeltas.length, 2);
+  assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 100);
   assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 94);
   assert.strictEqual(engine.onlineIntervals[0].online_to_snapshot_id, null);
   assert.strictEqual(engine.messages.size, 0);
   assert.strictEqual(engine.verifyRebuild().ok, true);
+})();
+
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  observation(engine, body(100, { entity: { death_drop_coins: 5, death_loss_preview: null } }), '00:20:00');
+  observation(engine, body(200, { entity: { death_drop_coins: 4, death_loss_preview: null } }), '00:21:00');
+  const quota = engine.quotaCurrent.get('7');
+  const adjustment = engine.quotaAdjustments.at(-1);
+  assert.strictEqual(quota.initial_quota, 100);
+  assert.strictEqual(quota.quota_value, null);
+  assert.strictEqual(adjustment.reason, 'drop_decrease');
+  assert.strictEqual(adjustment.loss_before, null);
+  assert.strictEqual(adjustment.adjustment, null);
+  assert.strictEqual(adjustment.computable, false);
+})();
+
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  observation(engine, body(500, { entity: { death_drop_coins: 5 } }), '00:22:00');
+  const nextDay = observation(engine, body(10, { entity: { death_drop_coins: 3, daily_budget_day_key_utc8: 20688 } }), '00:23:00');
+  assert.strictEqual(nextDay.parsed.serverDay, '2026-08-23');
+  assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 60);
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 60);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-22:7').income, 0);
+  engine.finalizeDay('2026-08-22', '2026-08-23T00:10:00.000Z');
+  assert.ok(engine.dailyQuota.get('2026-08-22:7').finalized_at);
 })();
 
 (() => {
@@ -133,6 +160,18 @@ function observation(engine, value, time) {
   const kill = engine.kills.get('9002');
   assert.strictEqual(kill.evidence_snapshot_id, engine.versions[1].snapshot_id);
   assert.deepStrictEqual(kill.victim_position, { x: 40, y: 50 });
+})();
+
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  const drop = { drop_id: 77, source_user_id: 7, system_spawned: false, x: 1, y: 2, amount: 5, created_tick: 100 };
+  const message = { id: 9010, tick: 100, kind: 'chat', user_id: 7, target_user_id: null, text: 'hello' };
+  observation(engine, body(100, {}, { coin_drops: [drop], messages: [message] }), '00:13:00');
+  observation(engine, body(200, {}, { coin_drops: [drop], messages: [message] }), '00:13:30');
+  assert.strictEqual(engine.messages.get('9010').last_observed_snapshot_id, engine.versions[1].snapshot_id);
+  observation(engine, body(300, {}, { coin_drops: [], messages: [] }), '00:14:00');
+  assert.strictEqual(engine.drops.get('2026-08-22:77').disappeared_at, '2026-08-21T16:14:00.000Z');
+  assert.strictEqual(engine.lastTouchedDrops[0].drop_id, 77);
 })();
 
 console.log('domain tests passed');

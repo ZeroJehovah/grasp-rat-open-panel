@@ -6,6 +6,7 @@ After=grasp-rat-projector.service
 Type=oneshot
 User=ubuntu
 WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
+EnvironmentFile=/home/ubuntu/grasp-rat-open-panel/.env
 ExecStart=/usr/bin/env node commands/retention.js --raw-dir /home/ubuntu/grasp-rat-open-panel/data/raw-snapshots --queue-dir /home/ubuntu/grasp-rat-open-panel/data/spool --raw-hours 24 --metadata-days 62
 NoNewPrivileges=true
 PrivateTmp=true

@@ -36,6 +36,16 @@ function readJson(filePath) {
   try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (_) { return null; }
 }
 
+function appendDurably(filePath, line) {
+  const fd = fs.openSync(filePath, 'a', 0o600);
+  try {
+    fs.writeSync(fd, line, null, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 class DurableObservationQueue {
   constructor(rootDirectory) {
     this.root = path.resolve(rootDirectory);
@@ -63,11 +73,32 @@ class DurableObservationQueue {
     };
     writeBodyDurably(bodyPath, body);
     atomicWrite(metadataPath, Buffer.from(`${JSON.stringify(item)}\n`));
-    fs.appendFileSync(this.logPath, `${JSON.stringify({ observationId, status: 'pending', at: item.queuedAt })}\n`, { mode: 0o600 });
+    appendDurably(this.logPath, `${JSON.stringify({ observationId, status: 'pending', at: item.queuedAt })}\n`);
     return item;
   }
 
+  recoverPartialMoves() {
+    const directories = [this.pending, this.processed, this.failed];
+    const targets = [this.processed, this.failed, this.pending];
+    for (const directory of directories) {
+      for (const file of fs.readdirSync(directory).filter(name => name.endsWith('.json'))) {
+        const metadataPath = path.join(directory, file);
+        if (!readJson(metadataPath)) continue;
+        const bodyName = file.replace(/\.json$/, '.body');
+        for (const target of targets) {
+          if (target === directory) continue;
+          const targetBody = path.join(target, bodyName);
+          const targetMetadata = path.join(target, file);
+          if (!fs.existsSync(targetBody) || fs.existsSync(targetMetadata)) continue;
+          fs.renameSync(metadataPath, targetMetadata);
+          break;
+        }
+      }
+    }
+  }
+
   recoverRawDirectory(rawDirectory) {
+    this.recoverPartialMoves();
     const manifestPath = path.join(path.resolve(rawDirectory), 'manifest.jsonl');
     if (!fs.existsSync(manifestPath)) return 0;
     const known = new Set();
@@ -132,6 +163,7 @@ class DurableObservationQueue {
     const maxItems = Number(options.maxItems || Infinity);
     const retryBaseMs = Number(options.retryBaseMs || 30_000);
     const maxAttempts = Number(options.maxAttempts || 5);
+    this.recoverPartialMoves();
     this.recoverFailed(now);
     const processed = [];
     for (const item of this.pendingItems(now).slice(0, maxItems)) {
@@ -147,7 +179,7 @@ class DurableObservationQueue {
         const destinationMetadata = path.join(this.processed, path.basename(item.metadataPath));
         fs.renameSync(item.bodyPath, destinationBody);
         fs.renameSync(item.metadataPath, destinationMetadata);
-        fs.appendFileSync(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'processed', at: new Date().toISOString() })}\n`);
+        appendDurably(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'processed', at: new Date().toISOString() })}\n`);
         processed.push({ item, status: 'processed' });
       } catch (error) {
         item.attempts = Number(item.attempts || 0) + 1;
@@ -161,11 +193,11 @@ class DurableObservationQueue {
           fs.renameSync(item.metadataPath, destinationMetadata);
           item.bodyPath = destinationBody;
           item.metadataPath = destinationMetadata;
-          fs.appendFileSync(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'failed', attempts: item.attempts, at: new Date().toISOString() })}\n`);
+          appendDurably(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'failed', attempts: item.attempts, at: new Date().toISOString() })}\n`);
           processed.push({ item, status: 'failed', error });
         } else {
           atomicWrite(item.metadataPath, Buffer.from(`${JSON.stringify(item)}\n`));
-          fs.appendFileSync(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'retry', attempts: item.attempts, at: new Date().toISOString() })}\n`);
+          appendDurably(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'retry', attempts: item.attempts, at: new Date().toISOString() })}\n`);
           processed.push({ item, status: 'retry', error });
         }
       }

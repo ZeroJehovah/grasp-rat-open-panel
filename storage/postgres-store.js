@@ -13,17 +13,20 @@ function toDate(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function rowToPlayer(row, stats = { kills: 0, deaths: 0 }) {
+function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
   const state = row.state || {};
+  const rowDay = row.server_day ? String(row.server_day).slice(0, 10) : null;
+  const currentDay = options.currentDay ? String(options.currentDay).slice(0, 10) : null;
+  const isCurrentDay = !currentDay || rowDay === currentDay;
   const quotaValue = row.quota_value === null || row.quota_value === undefined ? null : Number(row.quota_value);
   const initialQuota = row.initial_quota === null || row.initial_quota === undefined ? null : Number(row.initial_quota);
   return {
     userId: Number(row.user_id),
     name: row.current_name || '',
-    online: Boolean(row.online),
+    online: Boolean(row.online && isCurrentDay),
     lastSeenAt: toDate(row.last_seen_at),
     currentEntityId: row.current_entity_id === null ? null : Number(row.current_entity_id),
-    drop: row.server_day && state.death_drop_coins !== undefined ? Number(state.death_drop_coins) : null,
+    drop: isCurrentDay && state.death_drop_coins !== undefined ? Number(state.death_drop_coins) : null,
     quota: row.quota_day ? {
       day: row.quota_day,
       initial: initialQuota,
@@ -223,7 +226,7 @@ class PostgresPanelStore {
       this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
     ]);
     const stats = new Map(statsResult.rows.map(row => [String(row.user_id), row]));
-    let players = playersResult.rows.map(row => rowToPlayer(row, stats.get(String(row.user_id))));
+    let players = playersResult.rows.map(row => rowToPlayer(row, stats.get(String(row.user_id)), { currentDay: latest.server_day }));
     players = players.filter(player => {
       const state = player.state;
       const tired = state?.stamina1d !== null && state?.stamina1dLimit !== null && state?.stamina1d < state.stamina1dLimit;
@@ -277,7 +280,7 @@ class PostgresPanelStore {
       timezone: BUSINESS_TIMEZONE,
       generatedAt: new Date().toISOString(),
       closedThrough: latest && range.to < String(latest.server_day).slice(0, 10) ? range.to : null,
-      players: players.rows.map(row => rowToPlayer(row, statMap.get(String(row.user_id)))).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin')),
+      players: players.rows.map(row => rowToPlayer(row, statMap.get(String(row.user_id)), { currentDay: latest?.server_day })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin')),
       messages: messages.rows,
       kills: kills.rows,
       dailyQuota: quota.rows,
@@ -359,17 +362,15 @@ class PostgresPanelStore {
       await client.query(`UPDATE player_online_interval SET online_to_snapshot_id = $1, online_to_at = $2, closed_reason = $3 WHERE user_id = $4 AND segment_id = $5 AND online_from_snapshot_id = $6`, [interval.online_to_snapshot_id, interval.online_to_at, interval.closed_reason, interval.user_id, interval.segment_id, interval.online_from_snapshot_id]);
     }
     for (const message of this.engine.messages.values()) {
-      if (message.first_observed_snapshot_id !== parsed.snapshotId) continue;
+      if (message.last_observed_snapshot_id !== parsed.snapshotId) continue;
       await client.query(`INSERT INTO message_events (server_day, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id, first_observed_at, last_observed_at)
         VALUES ($1::date, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) ON CONFLICT (server_day, message_id) DO UPDATE SET last_observed_snapshot_id = EXCLUDED.last_observed_snapshot_id, last_observed_at = EXCLUDED.last_observed_at`, [message.server_day, message.message_id.split(':').at(-1), message.tick, message.kind, message.text, message.user_id, message.target_user_id, message.user_name, message.target_name, message.event_at, message.first_observed_snapshot_id, message.last_observed_snapshot_id, message.first_observed_at, message.last_observed_at]);
     }
-    for (const kill of this.engine.kills.values()) {
-      if (kill.evidence_snapshot_id !== parsed.snapshotId) continue;
+    for (const kill of this.engine.lastTouchedKills) {
       await client.query(`INSERT INTO kill_events (local_date, kill_id, message_id, event_at, server_day, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version)
-        VALUES ($1::date, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $18) ON CONFLICT (local_date, kill_id) DO NOTHING`, [kill.local_date, kill.kill_id, kill.message_id, kill.event_at, kill.server_day, kill.tick, kill.killer_user_id, kill.victim_user_id, kill.killer_name, kill.victim_name, kill.confidence, kill.evidence_snapshot_id, JSON.stringify(kill.drop), JSON.stringify(kill.victim_position), JSON.stringify(kill.killer_position), kill.victim_stamina_5s, kill.victim_stamina_5s_limit, kill.parser_version]);
+        VALUES ($1::date, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $18) ON CONFLICT (local_date, kill_id) DO UPDATE SET evidence_snapshot_id = EXCLUDED.evidence_snapshot_id, drop = COALESCE(EXCLUDED.drop, kill_events.drop), victim_position = COALESCE(EXCLUDED.victim_position, kill_events.victim_position), killer_position = COALESCE(EXCLUDED.killer_position, kill_events.killer_position), victim_stamina_5s = COALESCE(EXCLUDED.victim_stamina_5s, kill_events.victim_stamina_5s), victim_stamina_5s_limit = COALESCE(EXCLUDED.victim_stamina_5s_limit, kill_events.victim_stamina_5s_limit)`, [kill.local_date, kill.kill_id, kill.message_id, kill.event_at, kill.server_day, kill.tick, kill.killer_user_id, kill.victim_user_id, kill.killer_name, kill.victim_name, kill.confidence, kill.evidence_snapshot_id, JSON.stringify(kill.drop), JSON.stringify(kill.victim_position), JSON.stringify(kill.killer_position), kill.victim_stamina_5s, kill.victim_stamina_5s_limit, kill.parser_version]);
     }
-    for (const drop of this.engine.drops.values()) {
-      if (drop.first_seen_snapshot_id !== parsed.snapshotId && drop.last_seen_snapshot_id !== parsed.snapshotId) continue;
+    for (const drop of this.engine.lastTouchedDrops) {
       await client.query(`INSERT INTO coin_drop_lifecycles (server_day, drop_id, first_seen_snapshot_id, last_seen_snapshot_id, first_seen_at, last_seen_at, disappeared_at, source_user_id, system_spawned, x, y, amount, created_tick, source, confidence, kill_event_id)
         VALUES ($1::date, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (server_day, drop_id) DO UPDATE SET last_seen_snapshot_id = EXCLUDED.last_seen_snapshot_id, last_seen_at = EXCLUDED.last_seen_at, disappeared_at = EXCLUDED.disappeared_at, kill_event_id = EXCLUDED.kill_event_id`, [drop.server_day, drop.drop_id, drop.first_seen_snapshot_id, drop.last_seen_snapshot_id, drop.first_seen_at, drop.last_seen_at, drop.disappeared_at, drop.source_user_id, drop.system_spawned, drop.x, drop.y, drop.amount, drop.created_tick, drop.source, drop.confidence, drop.kill_event_id]);
     }
@@ -394,24 +395,21 @@ class PostgresPanelStore {
   async persistWarmingEvents(client, result) {
     const { parsed } = result;
     for (const message of this.engine.messages.values()) {
-      if (message.first_observed_snapshot_id !== parsed.snapshotId) continue;
+      if (message.last_observed_snapshot_id !== parsed.snapshotId) continue;
       await client.query(`INSERT INTO message_events (server_day, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id, first_observed_at, last_observed_at)
         VALUES ($1::date, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) ON CONFLICT (server_day, message_id) DO UPDATE SET last_observed_snapshot_id = EXCLUDED.last_observed_snapshot_id, last_observed_at = EXCLUDED.last_observed_at`, [message.server_day, message.message_id.split(':').at(-1), message.tick, message.kind, message.text, message.user_id, message.target_user_id, message.user_name, message.target_name, message.event_at, message.first_observed_snapshot_id, message.last_observed_snapshot_id, message.first_observed_at, message.last_observed_at]);
     }
-    for (const kill of this.engine.kills.values()) {
-      if (kill.evidence_snapshot_id !== parsed.snapshotId) continue;
+    for (const kill of this.engine.lastTouchedKills) {
       await client.query(`INSERT INTO kill_events (local_date, kill_id, message_id, event_at, server_day, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version)
         VALUES ($1::date, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $18) ON CONFLICT (local_date, kill_id) DO UPDATE SET evidence_snapshot_id = EXCLUDED.evidence_snapshot_id, drop = COALESCE(EXCLUDED.drop, kill_events.drop), victim_position = COALESCE(EXCLUDED.victim_position, kill_events.victim_position), killer_position = COALESCE(EXCLUDED.killer_position, kill_events.killer_position), victim_stamina_5s = COALESCE(EXCLUDED.victim_stamina_5s, kill_events.victim_stamina_5s), victim_stamina_5s_limit = COALESCE(EXCLUDED.victim_stamina_5s_limit, kill_events.victim_stamina_5s_limit)`, [kill.local_date, kill.kill_id, kill.message_id, kill.event_at, kill.server_day, kill.tick, kill.killer_user_id, kill.victim_user_id, kill.killer_name, kill.victim_name, kill.confidence, kill.evidence_snapshot_id, JSON.stringify(kill.drop), JSON.stringify(kill.victim_position), JSON.stringify(kill.killer_position), kill.victim_stamina_5s, kill.victim_stamina_5s_limit, kill.parser_version]);
     }
-    for (const drop of this.engine.drops.values()) {
-      if (drop.first_seen_snapshot_id !== parsed.snapshotId && drop.last_seen_snapshot_id !== parsed.snapshotId) continue;
+    for (const drop of this.engine.lastTouchedDrops) {
       await client.query(`INSERT INTO coin_drop_lifecycles (server_day, drop_id, first_seen_snapshot_id, last_seen_snapshot_id, first_seen_at, last_seen_at, disappeared_at, source_user_id, system_spawned, x, y, amount, created_tick, source, confidence, kill_event_id)
         VALUES ($1::date, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (server_day, drop_id) DO UPDATE SET last_seen_snapshot_id = EXCLUDED.last_seen_snapshot_id, last_seen_at = EXCLUDED.last_seen_at, disappeared_at = COALESCE(EXCLUDED.disappeared_at, coin_drop_lifecycles.disappeared_at), kill_event_id = COALESCE(EXCLUDED.kill_event_id, coin_drop_lifecycles.kill_event_id)`, [drop.server_day, drop.drop_id, drop.first_seen_snapshot_id, drop.last_seen_snapshot_id, drop.first_seen_at, drop.last_seen_at, drop.disappeared_at, drop.source_user_id, drop.system_spawned, drop.x, drop.y, drop.amount, drop.created_tick, drop.source, drop.confidence, drop.kill_event_id]);
     }
-    for (const stat of this.engine.dailyStats.values()) {
-      if (stat.local_date !== parsed.serverDay) continue;
-      await client.query(`INSERT INTO player_daily_stats (local_date, user_id, kills, deaths) VALUES ($1::date, $2, $3, $4) ON CONFLICT (local_date, user_id) DO UPDATE SET kills = EXCLUDED.kills, deaths = EXCLUDED.deaths`, [stat.local_date, stat.user_id, stat.kills, stat.deaths]);
-    }
+    // Warming-up messages can mention users that are not in the incomplete
+    // entity set yet. Their daily stats are persisted by the next stable
+    // projection after the corresponding players exist (the FK is deliberate).
   }
 }
 

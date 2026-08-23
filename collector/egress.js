@@ -87,6 +87,8 @@ class EgressScheduler {
         last_success_at: null,
         cooldown_until: 0,
         cooldown_reason: null,
+        probe_required: false,
+        probe_in_flight: false,
         consecutive_failures: 0,
         last_version: null
       };
@@ -123,6 +125,7 @@ class EgressScheduler {
 
   markAttempt(egress, now = Date.now()) {
     const state = this.stateFor(egress);
+    state.probe_in_flight = Boolean(state.probe_required);
     state.last_attempt_at = now;
     state.next_eligible_at = now + this.minIpIntervalMs;
     this.persist();
@@ -135,17 +138,21 @@ class EgressScheduler {
       state.last_success_at = now;
       state.cooldown_until = 0;
       state.cooldown_reason = null;
+      state.probe_required = false;
+      state.probe_in_flight = false;
       state.consecutive_failures = 0;
       state.last_version = result.versionToken || result.payloadHash || null;
       this.state.consecutiveFailures = 0;
     } else {
       state.consecutive_failures = Number(state.consecutive_failures || 0) + 1;
       this.state.consecutiveFailures = Number(this.state.consecutiveFailures || 0) + 1;
-      if (failureCategory === 'risk_control' || failureCategory === 'policy_rejected' || failureCategory === 'timeout') {
+      if (failureCategory === 'risk_control' || failureCategory === 'policy_rejected' || failureCategory === 'timeout' || state.probe_in_flight) {
         const cooldown = Math.min(this.maxCooldownMs, this.cooldownMs * (2 ** Math.max(0, state.consecutive_failures - 1)));
         state.cooldown_until = now + cooldown;
-        state.cooldown_reason = failureCategory;
+        state.cooldown_reason = failureCategory || 'health_probe_failed';
+        state.probe_required = true;
       }
+      state.probe_in_flight = false;
     }
     this.state.nextGroup = egress.group === 'A' ? 'B' : 'A';
     this.persist();
@@ -166,7 +173,7 @@ class EgressScheduler {
     for (const egress of this.egresses) {
       const state = this.stateFor(egress);
       if (Number(state.cooldown_until || 0) > now) cooling += 1;
-      else if (Number(state.next_eligible_at || 0) <= now) {
+      else if (!state.probe_required && Number(state.next_eligible_at || 0) <= now) {
         if (egress.group === 'A') availableA += 1;
         else availableB += 1;
       }
@@ -174,6 +181,7 @@ class EgressScheduler {
     return {
       availableEgressGroups: { A: availableA, B: availableB },
       coolingEgressCount: cooling,
+      healthProbeEgressCount: this.egresses.filter(egress => this.stateFor(egress).probe_required).length,
       consecutiveFailures: Number(this.state.consecutiveFailures || 0),
       nextEligibleAt: this.nextEligibleAt(now)
     };

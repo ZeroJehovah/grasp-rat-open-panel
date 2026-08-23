@@ -102,6 +102,8 @@ class ProjectionEngine {
     this.messages = new Map();
     this.kills = new Map();
     this.drops = new Map();
+    this.lastTouchedDrops = [];
+    this.lastTouchedKills = [];
     this.dailyStats = new Map();
     this.quotaCurrent = new Map();
     this.quotaAdjustments = [];
@@ -335,7 +337,12 @@ class ProjectionEngine {
     return this.players.get(key)?.current_name || null;
   }
 
+  touchKill(kill) {
+    if (kill && !this.lastTouchedKills.some(item => item.kill_id === kill.kill_id)) this.lastTouchedKills.push(kill);
+  }
+
   projectMessages(parsed, version, entitiesByUser, evidenceStates = this.currentStates) {
+    this.lastTouchedKills = [];
     for (const message of parsed.messages) {
       // Message IDs are globally stable in the observed service buffer. The
       // server day remains stored as evidence, but must not create a second
@@ -346,7 +353,10 @@ class ProjectionEngine {
         old.last_observed_snapshot_id = parsed.snapshotId;
         old.last_observed_at = version.observed_at;
         const oldKill = this.kills.get(messageKey);
-        if (oldKill) this.attachKillEvidence(oldKill, evidenceStates);
+        if (oldKill) {
+          this.attachKillEvidence(oldKill, evidenceStates);
+          this.touchKill(oldKill);
+        }
         continue;
       }
       const namesFromText = parseKillNames(message.text);
@@ -395,6 +405,7 @@ class ProjectionEngine {
         this.attachKillEvidence(kill, evidenceStates);
         if (!kill.evidence_snapshot_id) kill.evidence_snapshot_id = parsed.snapshotId;
         this.kills.set(messageKey, kill);
+        this.touchKill(kill);
         this.incrementDailyStat(message.local_date || event.local_date, message.user_id, 'kills');
         this.incrementDailyStat(message.local_date || event.local_date, message.target_user_id, 'deaths');
       }
@@ -428,10 +439,12 @@ class ProjectionEngine {
   }
 
   projectDrops(parsed, version, allowDisappearance = true) {
+    const touchedKeys = new Set();
     const presentKeys = new Set();
     for (const drop of parsed.drops) {
       const key = mapKey(parsed.serverDay, drop.drop_id);
       presentKeys.add(key);
+      touchedKeys.add(key);
       const old = this.drops.get(key);
       if (old) {
         old.last_seen_snapshot_id = parsed.snapshotId;
@@ -462,6 +475,7 @@ class ProjectionEngine {
       if (!allowDisappearance) continue;
       if (drop.server_day === parsed.serverDay && !presentKeys.has(mapKey(parsed.serverDay, drop.drop_id)) && !drop.disappeared_at) {
         drop.disappeared_at = version.observed_at;
+        touchedKeys.add(mapKey(parsed.serverDay, drop.drop_id));
       }
     }
     for (const kill of this.kills.values()) {
@@ -471,10 +485,13 @@ class ProjectionEngine {
         kill.coin_drop = { drop_id: candidate.drop_id, amount: candidate.amount, x: candidate.x, y: candidate.y, confidence: 'confirmed' };
         candidate.kill_event_id = kill.kill_id;
         candidate.confidence = 'confirmed';
+        this.touchKill(kill);
+        touchedKeys.add(mapKey(candidate.server_day, candidate.drop_id));
       } else {
         kill.coin_drop = { drop_id: null, amount: null, x: null, y: null, confidence: 'unknown' };
       }
     }
+    this.lastTouchedDrops = Array.from(touchedKeys).map(key => this.drops.get(key)).filter(Boolean);
   }
 
   projectQuota(parsed, version, previousStates) {

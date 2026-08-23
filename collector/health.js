@@ -28,10 +28,12 @@ function collectorHealth(options = {}) {
   let availableA = 0;
   let availableB = 0;
   let cooling = 0;
+  let probes = 0;
   for (const egress of egresses) {
     const item = state.egresses?.[egress.id] || {};
     if (item.last_success_at && (!latestSuccessAt || item.last_success_at > latestSuccessAt)) latestSuccessAt = item.last_success_at;
     if (Number(item.cooldown_until || 0) > now) cooling += 1;
+    else if (item.probe_required) probes += 1;
     else if (Number(item.next_eligible_at || 0) <= now) egress.group === 'A' ? availableA += 1 : availableB += 1;
   }
   const count = directory => { try { return fs.readdirSync(directory).filter(file => file.endsWith('.body')).length; } catch (_) { return 0; } };
@@ -41,6 +43,7 @@ function collectorHealth(options = {}) {
     queueDepth: count(path.join(queueDir, 'pending')),
     availableEgressGroups: { A: availableA, B: availableB },
     coolingEgressCount: cooling,
+    healthProbeEgressCount: probes,
     consecutiveFailures: Number(state.consecutiveFailures || 0),
     diskFreeBytes: diskFreeBytes(rawDir)
   };

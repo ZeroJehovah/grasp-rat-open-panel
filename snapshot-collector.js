@@ -34,6 +34,7 @@ function parseArgs(argv) {
     until: process.env.GRASP_RAT_PANEL_UNTIL || '',
     extraRetryMax: Number(process.env.GRASP_RAT_PANEL_EXTRA_RETRY_MAX || 1),
     retryJitterMs: Number(process.env.GRASP_RAT_PANEL_RETRY_JITTER_MS || 250),
+    extraRetryWindowMs: Number(process.env.GRASP_RAT_PANEL_EXTRA_RETRY_WINDOW_MS || 10_000),
     once: false,
     help: false
   };
@@ -55,6 +56,7 @@ function parseArgs(argv) {
     else if (arg === '--min-steady-entities') options.minSteadyEntities = Number(value());
     else if (arg === '--extra-retry-max') options.extraRetryMax = Number(value());
     else if (arg === '--retry-jitter-ms') options.retryJitterMs = Number(value());
+    else if (arg === '--extra-retry-window-ms') options.extraRetryWindowMs = Number(value());
     else if (arg === '--until') options.until = value();
     else if (arg === '--once') options.once = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
@@ -64,6 +66,7 @@ function parseArgs(argv) {
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 1000) throw new Error('timeout must be at least 1000ms');
   if (!Number.isFinite(options.minSteadyEntities) || options.minSteadyEntities < 0) throw new Error('min steady entities must be non-negative');
   if (!Number.isFinite(options.extraRetryMax) || options.extraRetryMax < 0) throw new Error('extra retry max must be non-negative');
+  if (!Number.isFinite(options.extraRetryWindowMs) || options.extraRetryWindowMs <= 0) throw new Error('extra retry window must be positive');
   if (options.until) {
     const untilMs = Date.parse(options.until);
     if (!Number.isFinite(untilMs)) throw new Error(`invalid --until date: ${options.until}`);
@@ -88,6 +91,7 @@ function usage() {
     '  --egress-config <file>     JSON array of four egress labels',
     '  --min-steady-entities <n>  Warming-up threshold (default: 900)',
     '  --extra-retry-max <n>      Retry window limit after both groups fail',
+    '  --extra-retry-window-ms <n> Maximum total time for extra retries',
     '  --until <date>             Stop at an ISO-8601 date/time',
     '  --once                     Fetch one round and exit',
     '  -h, --help                 Show this help'
@@ -96,6 +100,16 @@ function usage() {
 
 function ensureDirectory(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+}
+
+function appendDurably(filePath, line) {
+  const fd = fs.openSync(filePath, 'a', 0o600);
+  try {
+    fs.writeSync(fd, line, null, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function requestSnapshot(options, now = () => Date.now(), egress = null) {
@@ -176,12 +190,16 @@ function persistObservation(result, options, observedAt = new Date(), context = 
   const body = Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.body || '');
   const hash = crypto.createHash('sha256').update(body).digest('hex');
   const summary = safeSnapshotSummary(body);
-  const isSnapshot = result.statusCode >= 200 && result.statusCode < 300 && summary.validJson && summary.hasEntitiesArray;
+  const isSuccessfulResponse = result.statusCode >= 200 && result.statusCode < 300;
+  const isSnapshot = isSuccessfulResponse;
+  const validSnapshot = isSuccessfulResponse && summary.validJson && summary.hasEntitiesArray;
   const observationId = context.observationId || `obs-${crypto.randomUUID()}`;
   let fileName = null;
   let rawPath = null;
   if (isSnapshot) {
-    const suffix = `${summary.tick ?? 'notick'}-${hash.slice(0, 16)}-${observationId.slice(-8)}.json`;
+    const suffix = summary.validJson && summary.hasEntitiesArray
+      ? `${summary.tick ?? 'notick'}-${hash.slice(0, 16)}-${observationId.slice(-8)}.json`
+      : `response-${result.statusCode || 'success'}-${hash.slice(0, 16)}-${observationId.slice(-8)}.bin`;
     fileName = `${fileTimestamp(observedAt)}-${suffix}`;
     rawPath = path.join(options.outputDir, fileName);
     writeAtomically(rawPath, body);
@@ -198,6 +216,7 @@ function persistObservation(result, options, observedAt = new Date(), context = 
     file: fileName,
     rawPath,
     storedAsSnapshot: isSnapshot,
+    validSnapshot,
     parseStatus: isSnapshot ? 'pending' : 'invalid',
     egressId: context.egressId || null,
     egressGroup: context.egressGroup || null,
@@ -207,7 +226,7 @@ function persistObservation(result, options, observedAt = new Date(), context = 
     ...summary
   };
   const manifestPath = path.join(options.outputDir, 'manifest.jsonl');
-  fs.appendFileSync(manifestPath, `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 });
+  appendDurably(manifestPath, `${JSON.stringify(metadata)}\n`);
   return metadata;
 }
 
@@ -232,18 +251,18 @@ function persistRequestError(error, options, observedAt, context = {}) {
     failureCategory: context.failureCategory || classifyFailure(null, error),
     error: error?.message || String(error)
   };
-  fs.appendFileSync(path.join(options.outputDir, 'manifest.jsonl'), `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 });
+  appendDurably(path.join(options.outputDir, 'manifest.jsonl'), `${JSON.stringify(metadata)}\n`);
   return metadata;
 }
 
 async function enqueueSnapshot(queue, metadata, body) {
-  if (!queue || !metadata.storedAsSnapshot) return null;
+  if (!queue) return null;
   return queue.enqueue({
     ...metadata,
     observationId: metadata.observationId,
     observedAt: metadata.observedAt,
     rawPath: metadata.rawPath
-  }, body);
+  }, metadata.storedAsSnapshot ? body : Buffer.alloc(0));
 }
 
 async function collectOnce(options, dependencies = {}) {
@@ -261,9 +280,10 @@ async function collectOnce(options, dependencies = {}) {
     const result = await request(options, clock, egress);
     const metadata = persistObservation(result, options, observedAt, context);
     await enqueueSnapshot(dependencies.queue, metadata, Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.body || ''));
-    return { ok: metadata.storedAsSnapshot, metadata, result };
+    return { ok: metadata.validSnapshot, metadata, result };
   } catch (error) {
     const metadata = persistRequestError(error, options, observedAt, { ...context, failureCategory: classifyFailure(null, error) });
+    await enqueueSnapshot(dependencies.queue, metadata, Buffer.alloc(0));
     return { ok: false, metadata, error };
   }
 }
@@ -288,9 +308,9 @@ async function runAttempt(options, dependencies, scheduler, egress, queue, retry
   const metadata = error
     ? persistRequestError(error, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory })
     : persistObservation(result, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory });
-  if (!error && metadata.storedAsSnapshot) await enqueueSnapshot(queue, metadata, result.body);
+  await enqueueSnapshot(queue, metadata, error ? Buffer.alloc(0) : result.body);
   return {
-    ok: Boolean(!error && metadata.storedAsSnapshot),
+    ok: Boolean(!error && metadata.validSnapshot),
     metadata,
     result: resultWithVersion,
     error,
@@ -312,7 +332,9 @@ async function runRound(options, dependencies, scheduler, queue) {
     if (lastAttempt.ok) return { ...lastAttempt, extraRetries: 0 };
   }
   let extraRetries = 0;
-  while (extraRetries < options.extraRetryMax) {
+  const retryStartedAt = clock();
+  const retryWindowMs = Number(options.extraRetryWindowMs || 10_000);
+  while (extraRetries < options.extraRetryMax && clock() - retryStartedAt <= retryWindowMs) {
     const egress = scheduler.chooseNext(clock(), attempted);
     if (!egress) break;
     attempted.add(egress.id);
@@ -331,11 +353,14 @@ async function processQueue(queue, dependencies) {
     return dependencies.engine.applyObservation(body, {
       observationId: item.observationId,
       observedAt: item.observedAt,
+      receivedAt: item.receivedAt,
       rawPath: item.rawPath,
       payloadHash: item.payloadHash,
       bytes: item.bytes,
       statusCode: item.statusCode,
       durationMs: item.durationMs,
+      error: item.error,
+      parseStatus: item.parseStatus,
       egressId: item.egressId,
       egressGroup: item.egressGroup,
       retryNo: item.retryNo
@@ -371,7 +396,10 @@ async function runCollector(options, dependencies = {}) {
     if (round.ok) successes += 1;
     else failures += 1;
     extraRetries += round.extraRetries || 0;
-    if (round.collectorGap) collectorGaps += 1;
+    if (round.collectorGap) {
+      collectorGaps += 1;
+      if (dependencies.onCollectorGap) await dependencies.onCollectorGap({ type: 'collector_gap', at: new Date(clock()).toISOString(), round: polls });
+    }
     if (options.once || clock() >= options.untilMs) break;
     nextPollAtMs = Math.max(nextPollAtMs + options.intervalMs, clock());
   }
@@ -402,7 +430,7 @@ async function main(argv = process.argv.slice(2)) {
   const dependencies = process.env.PANEL_EMBED_PROJECTOR === '1'
     ? { engine: new ProjectionEngine({ minSteadyEntities: options.minSteadyEntities }) }
     : {};
-  const result = await runCollector(options, dependencies);
+  const result = await runCollector(options, { ...dependencies, onCollectorGap: event => console.error(JSON.stringify(event)) });
   console.log(JSON.stringify({ type: 'collector-finished', outputDir: options.outputDir, ...result }));
   return result.failures && !result.successes ? 1 : 0;
 }
