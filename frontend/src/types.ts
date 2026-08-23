@@ -89,6 +89,7 @@ export interface MetaResponse {
   availableDates: string[];
   earliestDate: string | null;
   latestDate: string | null;
+  presetRanges: Record<'today' | 'yesterday' | 'this-week' | 'last-week' | 'this-month' | 'last-month', { from: string; to: string } | null>;
   timezone: string;
   schemaVersion: string;
   features: Record<string, boolean>;

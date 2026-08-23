@@ -1,8 +1,20 @@
 'use strict';
 
 const assert = require('assert');
-const { parseSnapshot } = require('../domain/snapshot');
+const { addDays, parseSnapshot, presetRangesForDates } = require('../domain/snapshot');
 const { ProjectionEngine } = require('../domain/projector');
+
+assert.strictEqual(addDays('2024-02-28', 1), '2024-02-29');
+assert.deepStrictEqual(presetRangesForDates('2026-08-23', [
+  '2026-08-17', '2026-08-18', '2026-08-19', '2026-08-20', '2026-08-21', '2026-08-22', '2026-08-23'
+]), {
+  today: { from: '2026-08-23', to: '2026-08-23' },
+  yesterday: { from: '2026-08-22', to: '2026-08-22' },
+  'this-week': { from: '2026-08-17', to: '2026-08-23' },
+  'last-week': null,
+  'this-month': null,
+  'last-month': null
+});
 
 function entity(overrides = {}) {
   return {

@@ -2,7 +2,7 @@
 
 const { Pool } = require('pg');
 const { ProjectionEngine, loadMapMetadata } = require('../domain/projector');
-const { BUSINESS_TIMEZONE, SCHEMA_VERSION, cloneJson } = require('../domain/snapshot');
+const { BUSINESS_TIMEZONE, SCHEMA_VERSION, cloneJson, presetRangesForDates } = require('../domain/snapshot');
 
 const HISTORY_ROW_LIMITS = Object.freeze({
   players: 5_000,
@@ -271,6 +271,7 @@ class PostgresPanelStore {
       availableDates,
       earliestDate: availableDates[0] || null,
       latestDate: availableDates.at(-1) || null,
+      presetRanges: presetRangesForDates(availableDates.at(-1) || null, availableDates),
       timezone: BUSINESS_TIMEZONE,
       schemaVersion: SCHEMA_VERSION,
       features: { realtime: true, history: true, chat: true, kills: true, quota: true, bulletHistory: false }

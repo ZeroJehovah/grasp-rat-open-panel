@@ -9,6 +9,7 @@ const TICK_MS = 50;
 const DEFAULT_MIN_STEADY_ENTITIES = 900;
 const MAX_HISTORY_DAYS = 62;
 const SCHEMA_VERSION = 'snapshot-v1';
+const DATE_PRESET_KEYS = Object.freeze(['today', 'yesterday', 'this-week', 'last-week', 'this-month', 'last-month']);
 
 const NUMERIC_ENTITY_FIELDS = [
   'entity_id', 'user_id', 'x', 'y', 'vx', 'vy', 'hp', 'max_hp',
@@ -335,9 +336,43 @@ function businessDateRange(from, to) {
 }
 
 function addDays(dateString, amount) {
-  const timestamp = dateToUtcStart(dateString);
-  if (!Number.isFinite(timestamp)) return null;
-  return new Date(timestamp + amount * DAY_MS).toISOString().slice(0, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateString || '');
+  const offset = Number(amount);
+  if (!match || !Number.isFinite(offset)) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+  date.setUTCDate(date.getUTCDate() + offset);
+  return date.toISOString().slice(0, 10);
+}
+
+function presetRangesForDates(latestDate, availableDates = []) {
+  const ranges = Object.fromEntries(DATE_PRESET_KEYS.map(key => [key, null]));
+  if (!latestDate || !Array.isArray(availableDates) || availableDates.length === 0) return ranges;
+  const latest = new Date(`${latestDate}T00:00:00Z`);
+  if (Number.isNaN(latest.getTime())) return ranges;
+  const day = (latest.getUTCDay() + 6) % 7;
+  const monthStart = `${latestDate.slice(0, 7)}-01`;
+  const rawRanges = {
+    today: { from: latestDate, to: latestDate },
+    yesterday: { from: addDays(latestDate, -1), to: addDays(latestDate, -1) },
+    'this-week': { from: addDays(latestDate, -day), to: latestDate },
+    'last-week': { from: addDays(latestDate, -day - 7), to: addDays(latestDate, -day - 1) },
+    'this-month': { from: monthStart, to: latestDate },
+    'last-month': { from: `${addDays(monthStart, -1).slice(0, 7)}-01`, to: addDays(monthStart, -1) }
+  };
+  const available = new Set(availableDates.map(value => String(value).slice(0, 10)));
+  const covered = range => {
+    if (!range?.from || !range?.to || range.from > range.to) return null;
+    for (let date = range.from; date <= range.to; date = addDays(date, 1)) {
+      if (!available.has(date)) return null;
+    }
+    return range;
+  };
+  for (const key of DATE_PRESET_KEYS) ranges[key] = covered(rawRanges[key]);
+  return ranges;
 }
 
 module.exports = {
@@ -361,5 +396,7 @@ module.exports = {
   tickToIso,
   businessDateRange,
   addDays,
+  DATE_PRESET_KEYS,
+  presetRangesForDates,
   cloneJson
 };

@@ -10,6 +10,7 @@ const {
   diffState,
   tickToIso,
   localDateFromTimestamp,
+  presetRangesForDates,
   cloneJson
 } = require('./snapshot');
 
@@ -639,6 +640,7 @@ class ProjectionEngine {
       availableDates: dates,
       earliestDate: dates[0] || null,
       latestDate: dates[dates.length - 1] || null,
+      presetRanges: presetRangesForDates(dates.at(-1) || null, dates),
       timezone: BUSINESS_TIMEZONE,
       schemaVersion: SCHEMA_VERSION,
       features: {

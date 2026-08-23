@@ -13,33 +13,6 @@ function localDate(date = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
 }
 
-function shiftDate(value: string, days: number): string {
-  // These are business-calendar dates, not instants. Use a UTC calendar
-  // representation so Asia/Shanghai's UTC offset cannot shift the day.
-  const date = new Date(`${value}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-function rangeForPreset(preset: RangePreset, today: string): { from: string; to: string } {
-  const date = new Date(`${today}T00:00:00Z`);
-  const day = (date.getUTCDay() + 6) % 7;
-  if (preset === 'today') return { from: today, to: today };
-  if (preset === 'yesterday') return { from: shiftDate(today, -1), to: shiftDate(today, -1) };
-  if (preset === 'this-week') return { from: shiftDate(today, -day), to: today };
-  if (preset === 'last-week') { const end = shiftDate(today, -day - 1); return { from: shiftDate(end, -6), to: end }; }
-  const monthStart = `${today.slice(0, 7)}-01`;
-  if (preset === 'this-month') return { from: monthStart, to: today };
-  if (preset === 'last-month') { const end = shiftDate(monthStart, -1); return { from: `${end.slice(0, 7)}-01`, to: end }; }
-  return { from: today, to: today };
-}
-
-function presetAvailable(preset: RangePreset, today: string, availableDates: string[]): boolean {
-  if (preset === 'custom' || availableDates.length === 0) return false;
-  const range = rangeForPreset(preset, today);
-  return range.from >= availableDates[0] && range.to <= availableDates[availableDates.length - 1];
-}
-
 function formatTime(value?: string | null): string {
   if (!value) return '--';
   const date = new Date(value);
@@ -138,12 +111,14 @@ function Banner({ theme, onTheme }: { theme: 'light' | 'dark'; onTheme: () => vo
 
 function RangeControls({ meta }: { meta: MetaResponse | null }) {
   const range = useRangeStore();
-  const today = meta?.latestDate || localDate();
   const setPreset = (preset: RangePreset) => {
-    const next = rangeForPreset(preset, today);
-    const available = meta?.availableDates || [];
-    if (!presetAvailable(preset, today, available)) return;
-    rangeStore.set({ preset, from: next.from, to: next.to });
+    if (preset === 'custom') {
+      rangeStore.set({ ...range, preset });
+      return;
+    }
+    const next = meta?.presetRanges?.[preset];
+    if (!next) return;
+    rangeStore.set({ preset, ...next });
   };
   const updateDate = (field: 'from' | 'to', value: string) => {
     const next = { ...range, preset: 'custom' as const, [field]: value };
@@ -154,7 +129,7 @@ function RangeControls({ meta }: { meta: MetaResponse | null }) {
     <div className="section-heading"><div><p className="eyebrow">TIME WINDOW</p><h2>时间范围</h2></div><CalendarDays size={17} /></div>
     <div className="preset-grid">
       {([['today', '今日'], ['yesterday', '昨日'], ['this-week', '本周'], ['last-week', '上周'], ['this-month', '本月'], ['last-month', '上月'], ['custom', '指定日期']] as [RangePreset, string][]).map(([value, label]) => {
-        const available = value === 'custom' || presetAvailable(value, today, meta?.availableDates || []);
+        const available = value === 'custom' || Boolean(meta?.presetRanges?.[value]);
         return <button key={value} className={range.preset === value ? 'preset active' : 'preset'} onClick={() => setPreset(value)} disabled={!available} title={available ? undefined : '当前没有覆盖该范围的历史数据'}>{label}</button>;
       })}
     </div>
@@ -311,7 +286,7 @@ export default function App() {
   const [meta, setMeta] = useState<MetaResponse | null>(null);
   const [metaError, setMetaError] = useState<string | null>(null);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem(THEME_KEY, theme); }, [theme]);
-  useEffect(() => { const controller = new AbortController(); getMeta(controller.signal).then(value => { setMeta(value); if (!rangeStore.getSnapshot().from && value.latestDate) rangeStore.set({ preset: 'today', ...rangeForPreset('today', value.latestDate) }); }).catch(error => { if (error.name !== 'AbortError') setMetaError(error.message); }); return () => controller.abort(); }, []);
+  useEffect(() => { const controller = new AbortController(); getMeta(controller.signal).then(value => { setMeta(value); if (!rangeStore.getSnapshot().from && value.presetRanges?.today) rangeStore.set({ preset: 'today', ...value.presetRanges.today }); }).catch(error => { if (error.name !== 'AbortError') setMetaError(error.message); }); return () => controller.abort(); }, []);
   const range = useRangeStore();
   const data = usePanelData(meta, range);
   const realtimeAge = data.realtimeUpdatedAt ? ` · 最近更新 ${formatTime(data.realtimeUpdatedAt)}` : '';

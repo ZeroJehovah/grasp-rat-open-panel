@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 const meta = {
   map: { id: 'test-map', version: 1, bounds: { minX: -100, maxX: 100, minY: -100, maxY: 100 }, center: { x: 0, y: 0 }, directions: ['北', '东北', '东', '东南', '南', '西南', '西', '西北'], metersPerGameUnit: 1 },
-  availableDates: ['2026-08-22'], earliestDate: '2026-08-22', latestDate: '2026-08-22', timezone: 'Asia/Shanghai', schemaVersion: 'snapshot-v1', features: { realtime: true, history: true },
+  availableDates: ['2026-08-22'], earliestDate: '2026-08-22', latestDate: '2026-08-22', presetRanges: { today: { from: '2026-08-22', to: '2026-08-22' }, yesterday: null, 'this-week': null, 'last-week': null, 'this-month': null, 'last-month': null }, timezone: 'Asia/Shanghai', schemaVersion: 'snapshot-v1', features: { realtime: true, history: true },
 };
 const player = { userId: 7, name: 'fixture-player', online: true, lastSeenAt: '2026-08-22T00:01:00+08:00', currentEntityId: 1, drop: 12, quota: { day: '2026-08-22', initial: 200, value: 204, income: 4 }, income: 4, kills: 1, deaths: 0, state: { hp: 100, maxHp: 100, x: 20, y: 10, stamina5s: 10000, stamina1h: 3000000, stamina1d: 20000000, stamina5sLimit: 10000, stamina1hLimit: 3000000, stamina1dLimit: 20000000, currentJoinMode: 'Passive', life: 'Alive', snapshotId: 'test', observedAt: '2026-08-22T00:01:00+08:00' } };
 
@@ -61,7 +61,7 @@ test('an empty realtime candidate list does not fall back to historical players 
 });
 
 test('historical range excludes realtime events from a later day', async ({ page }) => {
-  const rangeMeta = { ...meta, availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23' };
+  const rangeMeta = { ...meta, availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { ...meta.presetRanges, today: { from: '2026-08-23', to: '2026-08-23' }, yesterday: { from: '2026-08-22', to: '2026-08-22' } } };
   const oldMessage = { message_id: 'old-message', server_day: '2026-08-22', event_at: '2026-08-22T01:00:00+08:00', kind: 'chat', text: 'old-chat', user_name: 'old-user' };
   const todayMessage = { message_id: 'today-message', server_day: '2026-08-23', event_at: '2026-08-23T01:00:00+08:00', kind: 'chat', text: 'today-chat', user_name: 'today-user' };
   const oldKill = { kill_id: 'old-kill', local_date: '2026-08-22', event_at: '2026-08-22T02:00:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'old-killer', victim_name: 'old-victim', confidence: 'confirmed', drop: { amount: 12 }, victim_stamina_5s: 10000, victim_stamina_5s_limit: 10000 };

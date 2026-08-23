@@ -38,6 +38,8 @@ function fixture() {
   const meta = await app.inject({ method: 'GET', url: '/api/v1/meta' });
   assert.strictEqual(meta.statusCode, 200);
   assert.strictEqual(meta.json().timezone, 'Asia/Shanghai');
+  assert.deepStrictEqual(meta.json().presetRanges.today, { from: '2026-08-22', to: '2026-08-22' });
+  assert.strictEqual(meta.json().presetRanges.yesterday, null);
   const version = await app.inject({ method: 'GET', url: '/api/v1/realtime/version' });
   assert.strictEqual(version.headers['cache-control'], 'no-store, no-cache, must-revalidate');
   const realtime = await app.inject({ method: 'GET', url: '/api/v1/realtime' });
