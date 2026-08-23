@@ -60,6 +60,25 @@ test('an empty realtime candidate list does not fall back to historical players 
   await expect(page.getByText('0 位玩家')).toBeVisible();
 });
 
+test('realtime refresh replaces the cached current-day aggregate', async ({ page }) => {
+  let live = false;
+  const rangeMeta = { ...meta, availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { ...meta.presetRanges, today: { from: '2026-08-23', to: '2026-08-23' } } };
+  const oldPlayer = { ...player, income: 4, todayIncome: 4, kills: 1, deaths: 0 };
+  const livePlayer = { ...player, income: 7, todayIncome: 7, kills: 3, deaths: 1 };
+  await page.route('**/api/v1/meta', route => route.fulfill({ json: rangeMeta }));
+  await page.route('**/api/v1/realtime*', route => route.fulfill({ json: { versionToken: live ? 'v2' : 'v1', generatedAt: '2026-08-23T02:00:00+08:00', latest: { snapshot_id: live ? 's2' : 's1', server_day: '2026-08-23', server_tick: live ? 20 : 10, observed_at: '2026-08-23T02:00:00+08:00' }, map: rangeMeta.map, players: [live ? livePlayer : oldPlayer], quota: [{ user_id: 7, quota_day: '2026-08-23', initial_quota: 200, quota_value: live ? 207 : 204 }], stats: [{ local_date: '2026-08-23', user_id: 7, kills: live ? 3 : 1, deaths: live ? 1 : 0 }], messages: [], kills: [] } }));
+  await page.route('**/api/v1/realtime/version', route => route.fulfill({ json: { versionToken: live ? 'v2' : 'v1', snapshotId: live ? 's2' : 's1', observedAt: '2026-08-23T02:00:00+08:00' } }));
+  await page.route('**/api/v1/history*', route => route.fulfill({ json: { from: '2026-08-23', to: '2026-08-23', timezone: 'Asia/Shanghai', generatedAt: '2026-08-23T02:00:00+08:00', closedThrough: null, players: [oldPlayer], messages: [], kills: [], dailyQuota: [{ local_date: '2026-08-23', user_id: 7, initial_quota: 200, closing_quota: 204, income: 4, finalized_at: null }], stats: [{ local_date: '2026-08-23', user_id: 7, kills: 1, deaths: 0 }] } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: '玩家列表' }).click();
+  const row = page.locator('.player-table tbody tr').first();
+  await expect(row.locator('td').nth(5)).toHaveText('+4');
+  live = true;
+  await expect(row.locator('td').nth(5)).toHaveText('+7', { timeout: 4_000 });
+  await expect(row.locator('td').nth(9)).toHaveText('3');
+  await expect(row.locator('td').nth(10)).toHaveText('1');
+});
+
 test('historical range excludes realtime events from a later day', async ({ page }) => {
   const rangeMeta = { ...meta, availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { ...meta.presetRanges, today: { from: '2026-08-23', to: '2026-08-23' }, yesterday: { from: '2026-08-22', to: '2026-08-22' } } };
   const oldMessage = { message_id: 'old-message', server_day: '2026-08-22', event_at: '2026-08-22T01:00:00+08:00', kind: 'chat', text: 'old-chat', user_name: 'old-user' };

@@ -34,6 +34,21 @@ function eventInRange(event: { event_at?: string; eventAt?: string; local_date?:
   return Boolean(day && day >= range.from && day <= range.to);
 }
 
+function rowForUserDay(rows: unknown[], userId: number, day: string): Record<string, unknown> | null {
+  const row = rows.find(value => {
+    if (!value || typeof value !== 'object') return false;
+    const candidate = value as Record<string, unknown>;
+    return Number(candidate.user_id) === userId && String(candidate.local_date || '').slice(0, 10) === day;
+  });
+  return row && typeof row === 'object' ? row as Record<string, unknown> : null;
+}
+
+function numericField(row: Record<string, unknown> | null, field: string): number | null {
+  if (!row || row[field] === null || row[field] === undefined) return null;
+  const value = Number(row[field]);
+  return Number.isFinite(value) ? value : null;
+}
+
 function formatAgo(value: string | null): string {
   if (!value) return '--前在线';
   const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000));
@@ -269,8 +284,35 @@ function MainPanel({ realtime, history, meta, range, loading, status }: { realti
   const realtimePlayers = realtime?.players || [];
   const historyPlayers = history?.players || [];
   const playerMap = new Map<number, Player>();
-  historyPlayers.forEach(player => playerMap.set(player.userId, player));
-  realtimePlayers.forEach(player => { const old = playerMap.get(player.userId); playerMap.set(player.userId, old ? { ...old, ...player, income: old.income, kills: old.kills, deaths: old.deaths } : player); });
+  const liveDay = realtime?.latest?.server_day?.slice(0, 10) || null;
+  const liveDayInRange = Boolean(liveDay && range.from <= liveDay && liveDay <= range.to);
+  const mergeCurrentDay = (old: Player, live: Player | null): Player => {
+    if (!liveDayInRange || !liveDay) return live ? { ...old, ...live, income: old.income, kills: old.kills, deaths: old.deaths } : old;
+    const oldStats = rowForUserDay(history?.stats || [], old.userId, liveDay);
+    const currentStats = rowForUserDay(realtime?.stats || [], old.userId, liveDay);
+    const oldKills = numericField(oldStats, 'kills') ?? 0;
+    const oldDeaths = numericField(oldStats, 'deaths') ?? 0;
+    const currentKills = numericField(currentStats, 'kills') ?? live?.kills ?? oldKills;
+    const currentDeaths = numericField(currentStats, 'deaths') ?? live?.deaths ?? oldDeaths;
+    const oldIncome = numericField(rowForUserDay(history?.dailyQuota || [], old.userId, liveDay), 'income');
+    const liveQuota = rowForUserDay(realtime?.quota || [], old.userId, liveDay);
+    const quotaValue = numericField(liveQuota, 'quota_value');
+    const initialQuota = numericField(liveQuota, 'initial_quota');
+    const liveIncome = live?.todayIncome ?? live?.income ?? (quotaValue !== null && initialQuota !== null ? quotaValue - initialQuota : null);
+    const mergedIncome = old.income !== null && liveIncome !== null
+      ? old.income - (oldIncome ?? 0) + liveIncome
+      : liveIncome ?? old.income;
+    return {
+      ...old,
+      ...(live || {}),
+      income: mergedIncome,
+      kills: old.kills - oldKills + currentKills,
+      deaths: old.deaths - oldDeaths + currentDeaths,
+      todayIncome: liveIncome ?? old.todayIncome
+    };
+  };
+  historyPlayers.forEach(player => playerMap.set(player.userId, mergeCurrentDay(player, realtimePlayers.find(candidate => candidate.userId === player.userId) || null)));
+  realtimePlayers.forEach(player => { if (!playerMap.has(player.userId)) playerMap.set(player.userId, player); });
   const players = playerCandidates([...playerMap.values()]);
   const messages = mergeById<Message>(history?.messages || [], realtime?.messages || [], 'message_id').filter(message => eventInRange(message, range));
   const kills = mergeById<Kill>(history?.kills || [], realtime?.kills || [], 'kill_id').filter(kill => eventInRange(kill, range));
