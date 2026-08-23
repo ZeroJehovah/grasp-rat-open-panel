@@ -26,6 +26,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@fastify/compress": "7.0.0",
     "@fastify/static": "7.0.4",
     "fastify": "4.28.1",
     "lucide-react": "0.468.0",

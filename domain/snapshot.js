@@ -249,9 +249,13 @@ function parseSnapshot(body, options = {}) {
   const resetGeneration = previous && isFiniteNumber(top.tick) && Number(top.tick) < Number(previous.serverTick)
     ? Number(previous.resetGeneration || 0) + 1
     : Number(previous?.resetGeneration || 0);
+  const configuredMinSteadyEntities = options.minSteadyEntities === undefined || options.minSteadyEntities === null
+    ? DEFAULT_MIN_STEADY_ENTITIES
+    : Number(options.minSteadyEntities);
+  const minSteadyEntities = Number.isFinite(configuredMinSteadyEntities) ? configuredMinSteadyEntities : DEFAULT_MIN_STEADY_ENTITIES;
   const completeness = errors.length > 0
     ? 'invalid'
-    : entities.length < Number(options.minSteadyEntities || DEFAULT_MIN_STEADY_ENTITIES)
+    : entities.length < minSteadyEntities
       ? 'warming_up'
       : 'steady';
   const normalizedEntities = entities.map(normaliseEntity);

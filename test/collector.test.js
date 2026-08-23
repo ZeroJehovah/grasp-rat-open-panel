@@ -77,6 +77,10 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   const health = collectorHealth({ stateFile: statePath, queueDir: queue.root, rawDir: outputDir, egresses });
   assert.strictEqual(health.healthProbeEgressCount, 1);
   assert.deepStrictEqual(health.availableEgressGroups, { A: 0, B: 1 });
+  const configPath = path.join(root, 'egresses.json');
+  fs.writeFileSync(configPath, JSON.stringify([{ id: 'A-custom', group: 'A' }, { id: 'B-custom', group: 'B' }]));
+  const configuredHealth = collectorHealth({ stateFile: statePath, queueDir: queue.root, rawDir: outputDir, egressConfigPath: configPath });
+  assert.deepStrictEqual(configuredHealth.availableEgressGroups, { A: 1, B: 1 });
   console.log('queue recovery and health tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 

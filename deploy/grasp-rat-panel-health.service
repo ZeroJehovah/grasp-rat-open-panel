@@ -8,7 +8,7 @@ Type=oneshot
 User=ubuntu
 WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
 EnvironmentFile=-/home/ubuntu/grasp-rat-open-panel/.env
+Environment=GRASP_RAT_PANEL_EGRESS_CONFIG=/home/ubuntu/grasp-rat-open-panel/deploy/egresses.json
 ExecStart=/usr/bin/env node commands/health-check.js
 NoNewPrivileges=true
 PrivateTmp=true
-

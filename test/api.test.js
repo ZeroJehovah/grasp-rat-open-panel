@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('assert');
+const zlib = require('zlib');
 const { ProjectionEngine } = require('../domain/projector');
 const { buildServer } = require('../api/server');
 
@@ -42,6 +43,14 @@ function fixture() {
   const history = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22' });
   assert.strictEqual(history.statusCode, 200);
   assert.strictEqual(history.json().from, '2026-08-22');
+  const compressedApp = await buildServer({ store: {
+    getMeta: async () => ({ earliestDate: '2026-08-22', latestDate: '2026-08-22' }),
+    getHistory: async () => ({ from: '2026-08-22', to: '2026-08-22', timezone: 'Asia/Shanghai', closedThrough: null, players: Array.from({ length: 100 }, (_, index) => ({ userId: index, name: 'compression-fixture-' + 'x'.repeat(32) })), messages: [], kills: [], dailyQuota: [], stats: [] })
+  } });
+  const compressedHistory = await compressedApp.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22', headers: { 'accept-encoding': 'gzip' } });
+  assert.strictEqual(compressedHistory.headers['content-encoding'], 'gzip');
+  assert.strictEqual(JSON.parse(zlib.gunzipSync(compressedHistory.rawPayload).toString('utf8')).from, '2026-08-22');
+  await compressedApp.close();
   const cachedHistory = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22', headers: { 'if-none-match': history.headers.etag } });
   assert.strictEqual(cachedHistory.statusCode, 304);
   await app.close();

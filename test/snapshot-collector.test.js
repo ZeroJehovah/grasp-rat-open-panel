@@ -11,6 +11,7 @@ const {
   runCollector
 } = require('../snapshot-collector');
 const { DurableObservationQueue } = require('../collector/queue');
+const { parseSnapshot } = require('../domain/snapshot');
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-rat-panel-'));
@@ -38,6 +39,8 @@ assert.deepStrictEqual(safeSnapshotSummary(payload), {
   messageCount: 0,
   hasEntitiesArray: true
 });
+const emptySnapshot = Buffer.from(JSON.stringify({ type: 'snapshot', tick: 1, total_entities: 0, in_game: 0, visible: 0, occupied_cells: 0, entities: [], bullets: [], coin_drops: [], messages: [] }));
+assert.strictEqual(parseSnapshot(emptySnapshot, { observedAt: '2026-08-22T00:00:00+08:00', minSteadyEntities: 0 }).completeness, 'steady');
 
 (async () => {
   const outputDir = tempDir();

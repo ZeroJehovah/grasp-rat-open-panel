@@ -62,7 +62,9 @@ existing CPAMP management service on port `18317` on the deployment host.
 `/api/v1/realtime/version` is always `no-store`. Historical responses are
 range-limited to at most 62 calendar days, use stable ordering and bounded
 result sets, and are cacheable; an oversized result returns `413` instead of
-being silently truncated. Realtime responses use a version token and ETag.
+being silently truncated. JSON responses over 1 KiB negotiate Brotli, gzip or
+deflate when the client advertises support. Realtime responses use a version
+token and ETag.
 Migration `004_date_partitions.sql` keeps the date-keyed fact tables in a
 rolling daily-partition window while retaining a default partition as a safety
 net.

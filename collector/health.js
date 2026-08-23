@@ -23,7 +23,10 @@ function collectorHealth(options = {}) {
   const queueDir = options.queueDir || process.env.GRASP_RAT_PANEL_QUEUE_DIR || path.resolve(__dirname, '../../data/spool');
   const rawDir = options.rawDir || process.env.GRASP_RAT_PANEL_SNAPSHOT_DIR || path.resolve(__dirname, '../../data/raw-snapshots');
   const state = readState(statePath) || { egresses: {}, consecutiveFailures: 0 };
-  const egresses = loadEgresses(options);
+  const egresses = loadEgresses({
+    ...options,
+    egressConfigPath: options.egressConfigPath || process.env.GRASP_RAT_PANEL_EGRESS_CONFIG
+  });
   let latestSuccessAt = null;
   let availableA = 0;
   let availableB = 0;

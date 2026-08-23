@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const path = require('path');
 const Fastify = require('fastify');
+const fastifyCompress = require('@fastify/compress');
 
 const { ProjectionEngine } = require('../domain/projector');
 const { HISTORY_ROW_LIMITS, PostgresPanelStore } = require('../storage/postgres-store');
@@ -63,6 +64,10 @@ function buildStore(options = {}) {
 async function buildServer(options = {}) {
   const store = buildStore(options);
   const app = Fastify({ logger: options.logger || false, trustProxy: true });
+  await app.register(fastifyCompress, {
+    threshold: 1024,
+    encodings: ['br', 'gzip', 'deflate']
+  });
   app.decorate('panelStore', store);
   app.decorate('collectorHealth', options.collectorHealth || (() => collectorHealth()));
   app.addHook('onRequest', async (request, reply) => {
