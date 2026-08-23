@@ -26,7 +26,7 @@ test('desktop panel keeps the three primary regions and data tabs', async ({ pag
   await page.getByRole('button', { name: '玩家列表' }).click();
   await expect(page.getByText('fixture-player')).toBeVisible();
   const topLevelOrder = await page.locator('.app-shell > *').evaluateAll(elements => elements.map(element => element.className));
-  expect(topLevelOrder.slice(0, 3)).toEqual(['banner', 'global-status', 'main-grid']);
+  expect(topLevelOrder).toEqual(['banner', 'main-grid', 'footer']);
   await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
 });
 
@@ -41,7 +41,7 @@ test('narrow panel keeps range, tabs and footer reachable', async ({ page }, tes
   await expect(page.getByText('没有符合阈值的击杀记录')).toBeVisible();
   await expect(page.getByRole('link', { name: 'GitHub' })).toBeVisible();
   const topLevelOrder = await page.locator('.app-shell > *').evaluateAll(elements => elements.map(element => element.className));
-  expect(topLevelOrder.slice(0, 3)).toEqual(['banner', 'global-status', 'main-grid']);
+  expect(topLevelOrder).toEqual(['banner', 'main-grid', 'footer']);
   await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
 });
 
