@@ -151,7 +151,9 @@ class EgressScheduler {
         consecutive_failures: 0,
         last_version: null,
         last_benchmark_duration_ms: null,
-        last_benchmark_success: false
+        last_benchmark_success: false,
+        last_probe_at: null,
+        last_probe_success: null
       };
     }
     if (!this.dailyBenchmark && this.state.runtimeActiveEgressIds.length === 0) {
@@ -265,6 +267,45 @@ class EgressScheduler {
     return candidates[0] || null;
   }
 
+  chooseProbe(now = Date.now(), excluded = new Set()) {
+    const candidates = this.egresses.filter(egress => {
+      const state = this.stateFor(egress);
+      return state
+        && state.probe_required
+        && !excluded.has(egress.id)
+        && now >= Number(state.next_eligible_at || 0)
+        && now >= Number(state.cooldown_until || 0);
+    });
+    candidates.sort((a, b) => {
+      const sa = this.stateFor(a);
+      const sb = this.stateFor(b);
+      return Number(sa.last_attempt_at || 0) - Number(sb.last_attempt_at || 0)
+        || Number(sa.last_benchmark_duration_ms ?? Number.MAX_SAFE_INTEGER) - Number(sb.last_benchmark_duration_ms ?? Number.MAX_SAFE_INTEGER)
+        || a.id.localeCompare(b.id);
+    });
+    return candidates[0] || null;
+  }
+
+  restoreAfterProbe(egress) {
+    if (!this.dailyBenchmark) return;
+    const selected = new Set(this.state.activeEgressIds || []);
+    if (!selected.has(egress.id)) return;
+    const current = this.runtimePoolIds();
+    if (current.has(egress.id)) return;
+    const next = Array.from(current);
+    const temporary = next
+      .filter(id => !selected.has(id))
+      .map(id => this.egresses.find(candidate => candidate.id === id))
+      .filter(Boolean)
+      .sort((a, b) => Number(a.group !== egress.group) - Number(b.group !== egress.group) || a.id.localeCompare(b.id));
+    if (next.length >= this.activeCount && temporary.length > 0) {
+      next.splice(next.indexOf(temporary[0].id), 1);
+    }
+    if (next.length < this.activeCount) next.push(egress.id);
+    this.state.runtimeActiveEgressIds = Array.from(new Set(next));
+    this.persist();
+  }
+
   chooseNext(now = Date.now(), excluded = new Set()) {
     const first = this.state.nextGroup === 'A' ? 'A' : 'B';
     const second = first === 'A' ? 'B' : 'A';
@@ -282,6 +323,7 @@ class EgressScheduler {
   markResult(egress, result, now = Date.now(), error = null, context = {}) {
     const state = this.stateFor(egress);
     const failureCategory = classifyFailure(result, error);
+    const wasProbe = Boolean(state.probe_in_flight || state.probe_required);
     if (!failureCategory && result?.statusCode >= 200 && result.statusCode < 300) {
       state.last_success_at = now;
       state.cooldown_until = 0;
@@ -290,6 +332,11 @@ class EgressScheduler {
       state.probe_in_flight = false;
       state.consecutive_failures = 0;
       state.last_version = result.versionToken || result.payloadHash || null;
+      if (wasProbe) {
+        state.last_probe_at = new Date(now).toISOString();
+        state.last_probe_success = true;
+        this.restoreAfterProbe(egress);
+      }
       this.state.consecutiveFailures = 0;
     } else {
       state.consecutive_failures = Number(state.consecutive_failures || 0) + 1;
@@ -299,6 +346,10 @@ class EgressScheduler {
         state.cooldown_until = now + cooldown;
         state.cooldown_reason = failureCategory || 'health_probe_failed';
         state.probe_required = true;
+      }
+      if (wasProbe) {
+        state.last_probe_at = new Date(now).toISOString();
+        state.last_probe_success = false;
       }
       state.probe_in_flight = false;
       if (!context.benchmark) this.rotateAfterFailure(egress, now);

@@ -36,9 +36,26 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   scheduler.setDailySelection('2026-08-23', ['A2', 'A3', 'B2', 'B3'], 0, benchmark);
   const failed = candidates.find(egress => egress.id === 'A2');
   scheduler.markAttempt(failed, 1);
-  scheduler.markResult(failed, { statusCode: 502, body: Buffer.from('bad gateway') }, 2);
+  scheduler.markResult(failed, { statusCode: 403, body: Buffer.from('forbidden') }, 2);
   assert.ok(scheduler.runtimePoolIds().has('A1'), 'failed active egress should be replaced from the candidate pool');
   assert.ok(!scheduler.runtimePoolIds().has('A2'));
+  const probeAt = scheduler.stateFor(failed).cooldown_until + 1;
+  assert.strictEqual(scheduler.chooseProbe(probeAt).id, 'A2', 'a cooled inactive egress should receive a health probe');
+  scheduler.markAttempt(failed, probeAt);
+  scheduler.markResult(failed, { statusCode: 200, body: Buffer.from('{}'), payloadHash: 'probe-ok' }, probeAt + 1);
+  assert.strictEqual(scheduler.stateFor(failed).probe_required, false);
+  assert.ok(scheduler.runtimePoolIds().has('A2'), 'a recovered selected egress should reclaim its active slot');
+  assert.ok(!scheduler.runtimePoolIds().has('A1'), 'temporary replacement should leave after probe recovery');
+  const inactive = candidates.find(egress => egress.id === 'A1');
+  const inactiveState = scheduler.stateFor(inactive);
+  inactiveState.probe_required = true;
+  inactiveState.cooldown_until = 0;
+  inactiveState.next_eligible_at = 0;
+  assert.strictEqual(scheduler.chooseProbe(0).id, 'A1', 'inactive benchmark candidates should also be probeable');
+  scheduler.markAttempt(inactive, 0);
+  scheduler.markResult(inactive, { statusCode: 200, body: Buffer.from('{}'), payloadHash: 'inactive-probe-ok' }, 1);
+  assert.strictEqual(inactiveState.probe_required, false);
+  assert.deepStrictEqual([...scheduler.runtimePoolIds()].sort(), ['A2', 'A3', 'B2', 'B3']);
   console.log('daily egress benchmark and runtime rotation tests passed');
 })();
 

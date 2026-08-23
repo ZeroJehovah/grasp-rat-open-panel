@@ -392,6 +392,17 @@ async function runEgressBenchmark(options, dependencies, scheduler, queue) {
 async function runRound(options, dependencies, scheduler, queue) {
   const clock = dependencies.now || (() => Date.now());
   const attempted = new Set();
+  const probe = scheduler.chooseProbe?.(clock(), attempted);
+  let probeAttempt = null;
+  if (probe) {
+    attempted.add(probe.id);
+    probeAttempt = await runAttempt(options, dependencies, scheduler, probe, queue, 0, { probe: true });
+    // If all regular exits have disappeared, a successful health probe is a
+    // safe temporary source for one snapshot while the normal pool recovers.
+    if (probeAttempt.ok && scheduler.runtimePoolIds().size === 0) {
+      return { ...probeAttempt, extraRetries: 0, probe: true };
+    }
+  }
   const firstGroup = scheduler.state.nextGroup === 'B' ? 'B' : 'A';
   const groups = [firstGroup, firstGroup === 'A' ? 'B' : 'A'];
   let lastAttempt = null;
@@ -415,7 +426,7 @@ async function runRound(options, dependencies, scheduler, queue) {
     lastAttempt = await runAttempt(options, dependencies, scheduler, egress, queue, extraRetries);
     if (lastAttempt.ok) return { ...lastAttempt, extraRetries };
   }
-  return { ...(lastAttempt || { ok: false, metadata: null }), extraRetries, collectorGap: true };
+  return { ...(lastAttempt || probeAttempt || { ok: false, metadata: null }), extraRetries, collectorGap: true };
 }
 
 async function processQueue(queue, dependencies) {
