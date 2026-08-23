@@ -21,6 +21,9 @@ function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-rat-ret
   const queue = new DurableObservationQueue(queueDir);
   queue.enqueue({ observationId: 'old-observation', rawPath, parseStatus: 'pending' }, Buffer.from('raw-body'));
   await queue.process(async () => ({ status: 'projected' }));
+  // Exercise retention's legacy/repair path as well: a body may remain if a
+  // prior process stopped after committing metadata but before cleanup.
+  fs.writeFileSync(path.join(queueDir, 'processed', 'old-observation.body'), 'stale-body');
   const result = runRetention({ rawDir, queueDir, rawHours: 24, metadataDays: 62, now: new Date('2026-08-23T00:00:00Z'), dryRun: false });
   assert.strictEqual(result.deleted, 1);
   assert.strictEqual(result.processedBodiesDeleted, 1);

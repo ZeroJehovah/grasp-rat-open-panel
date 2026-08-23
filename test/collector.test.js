@@ -96,6 +96,12 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   assert.strictEqual(retryQueue.recoverFailed(Date.now() + 3_600_000), 1);
   assert.ok(retryQueue.pendingItems(Date.now() + 3_600_000).some(item => item.observationId === retry.observationId));
 
+  const compactQueue = new DurableObservationQueue(path.join(root, 'compact-queue'));
+  const compact = compactQueue.enqueue({ observationId: 'compact-me' }, Buffer.from('body'));
+  await compactQueue.process(async () => ({ status: 'projected' }));
+  assert.strictEqual(fs.existsSync(path.join(compactQueue.processed, 'compact-me.body')), false);
+  assert.strictEqual(fs.existsSync(path.join(compactQueue.processed, 'compact-me.json')), true);
+
   const statePath = path.join(root, 'state.json');
   const healthNow = Date.now();
   fs.writeFileSync(statePath, JSON.stringify({ consecutiveFailures: 2, egresses: {

@@ -195,6 +195,7 @@ class DurableObservationQueue {
     const maxAttempts = Number(options.maxAttempts || 5);
     this.recoverPartialMoves();
     this.recoverFailed(now);
+    this.cleanupProcessedBodies();
     const processed = [];
     for (const item of this.pendingItems(now).slice(0, maxItems)) {
       try {
@@ -209,6 +210,14 @@ class DurableObservationQueue {
         const destinationMetadata = path.join(this.processed, path.basename(item.metadataPath));
         durableRename(item.bodyPath, destinationBody);
         durableRename(item.metadataPath, destinationMetadata);
+        try {
+          fs.unlinkSync(destinationBody);
+          syncDirectory(this.processed);
+        } catch (_) {
+          // The database transaction and terminal metadata are already
+          // durable. A cleanup failure must not turn a committed observation
+          // into a retry; the next projector start/retention run can retry it.
+        }
         appendDurably(this.logPath, `${JSON.stringify({ observationId: item.observationId, status: 'processed', at: new Date().toISOString() })}\n`);
         processed.push({ item, status: 'processed' });
       } catch (error) {
@@ -242,6 +251,26 @@ class DurableObservationQueue {
   status() {
     const count = directory => fs.readdirSync(directory).filter(file => file.endsWith('.body')).length;
     return { pending: count(this.pending), processed: count(this.processed), failed: count(this.failed) };
+  }
+
+  cleanupProcessedBodies() {
+    let deleted = 0;
+    for (const file of fs.readdirSync(this.processed).filter(name => name.endsWith('.body'))) {
+      const bodyPath = path.join(this.processed, file);
+      const metadataPath = path.join(this.processed, file.replace(/\.body$/, '.json'));
+      // A processed metadata file is the durable commit marker. Keep the
+      // metadata for retention/audit, but the body is already preserved in
+      // raw-snapshots and is no longer needed for queue recovery.
+      if (!readJson(metadataPath)) continue;
+      try {
+        fs.unlinkSync(bodyPath);
+        deleted += 1;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+    if (deleted > 0) syncDirectory(this.processed);
+    return deleted;
   }
 }
 
