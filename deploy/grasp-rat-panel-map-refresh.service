@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh versioned Grasp Rat map metadata
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
+Environment=PANEL_MAP_METADATA_FILE=/home/ubuntu/grasp-rat-open-panel/data/map-metadata.json
+ExecStart=/usr/bin/env node commands/refresh-map-metadata.js
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/home/ubuntu/grasp-rat-open-panel/data

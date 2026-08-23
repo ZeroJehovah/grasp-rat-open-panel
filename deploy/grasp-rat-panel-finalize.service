@@ -1,0 +1,12 @@
+[Unit]
+Description=Finalize yesterday's Grasp Rat daily quota
+After=grasp-rat-projector.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
+EnvironmentFile=-/home/ubuntu/grasp-rat-open-panel/.env
+ExecStart=/usr/bin/env node commands/finalize-day.js
+NoNewPrivileges=true
+PrivateTmp=true

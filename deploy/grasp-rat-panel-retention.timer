@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Grasp Rat Open Panel retention daily
+
+[Timer]
+OnBootSec=15min
+OnCalendar=*-*-* 00:20:00 Asia/Shanghai
+Persistent=true
+Unit=grasp-rat-panel-retention.service
+
+[Install]
+WantedBy=timers.target

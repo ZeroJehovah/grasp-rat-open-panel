@@ -1,15 +1,18 @@
 [Unit]
-Description=Grasp Rat Open Panel raw snapshot collector
+Description=Grasp Rat Open Panel multi-egress snapshot collector
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
+User=ubuntu
 WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
-ExecStart=/usr/bin/env node snapshot-collector.js --interval-ms 30000 --until 2026-08-22T06:00:00+08:00 --output-dir /home/ubuntu/grasp-rat-open-panel/data/raw-snapshots
-Restart=no
+ExecStart=/usr/bin/env node snapshot-collector.js --interval-ms 15000 --output-dir /home/ubuntu/grasp-rat-open-panel/data/raw-snapshots --queue-dir /home/ubuntu/grasp-rat-open-panel/data/spool --state-file /home/ubuntu/grasp-rat-open-panel/data/collector-state.json --egress-config /home/ubuntu/grasp-rat-open-panel/deploy/egresses.json
+Restart=always
+RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
+ReadWritePaths=/home/ubuntu/grasp-rat-open-panel/data
 
 [Install]
 WantedBy=default.target

@@ -1,0 +1,9 @@
+# Keep the public hostname and tunnel credentials outside Git.
+# The tunnel should expose only the API/static service; collector and PostgreSQL
+# remain localhost/private.
+tunnel: REPLACE_WITH_TUNNEL_ID
+credentials-file: /home/ubuntu/.config/cloudflared/REPLACE_WITH_TUNNEL_ID.json
+ingress:
+  - hostname: panel.example.invalid
+    service: http://127.0.0.1:19317
+  - service: http_status:404

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Grasp Rat map metadata daily
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* 00:05:00 Asia/Shanghai
+Persistent=true
+Unit=grasp-rat-panel-map-refresh.service
+
+[Install]
+WantedBy=timers.target

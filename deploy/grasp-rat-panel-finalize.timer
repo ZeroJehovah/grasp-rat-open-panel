@@ -1,0 +1,11 @@
+[Unit]
+Description=Finalize Grasp Rat daily quota after local day boundary
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-* 00:15:00 Asia/Shanghai
+Persistent=true
+Unit=grasp-rat-panel-finalize.service
+
+[Install]
+WantedBy=timers.target

@@ -7,19 +7,33 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 
+const { EgressScheduler, loadEgresses, classifyFailure } = require('./collector/egress');
+const { DurableObservationQueue } = require('./collector/queue');
+const { ProjectionEngine } = require('./domain/projector');
+const { diskFreeBytes } = require('./collector/health');
+
 const DEFAULT_ORIGIN = 'https://grasp-rat-game.h-e.top';
 const DEFAULT_PATH = '/snapshot';
-const DEFAULT_INTERVAL_MS = 30_000;
+const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_QUEUE_DIR = path.resolve(__dirname, '../data/spool');
+const DEFAULT_STATE_FILE = path.resolve(__dirname, '../data/collector-state.json');
 
 function parseArgs(argv) {
+  const outputDir = process.env.GRASP_RAT_PANEL_SNAPSHOT_DIR || path.resolve(__dirname, '../data/raw-snapshots');
   const options = {
     origin: process.env.GRASP_RAT_PANEL_GAME_ORIGIN || DEFAULT_ORIGIN,
     snapshotPath: process.env.GRASP_RAT_PANEL_SNAPSHOT_PATH || DEFAULT_PATH,
     intervalMs: Number(process.env.GRASP_RAT_PANEL_INTERVAL_MS || DEFAULT_INTERVAL_MS),
     timeoutMs: Number(process.env.GRASP_RAT_PANEL_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
-    outputDir: process.env.GRASP_RAT_PANEL_SNAPSHOT_DIR || path.resolve(__dirname, '../data/raw-snapshots'),
+    outputDir,
+    queueDir: process.env.GRASP_RAT_PANEL_QUEUE_DIR || DEFAULT_QUEUE_DIR,
+    stateFile: process.env.GRASP_RAT_PANEL_STATE_FILE || DEFAULT_STATE_FILE,
+    egressConfigPath: process.env.GRASP_RAT_PANEL_EGRESS_CONFIG || '',
+    minSteadyEntities: Number(process.env.GRASP_RAT_PANEL_MIN_STEADY_ENTITIES || 900),
     until: process.env.GRASP_RAT_PANEL_UNTIL || '',
+    extraRetryMax: Number(process.env.GRASP_RAT_PANEL_EXTRA_RETRY_MAX || 1),
+    retryJitterMs: Number(process.env.GRASP_RAT_PANEL_RETRY_JITTER_MS || 250),
     once: false,
     help: false
   };
@@ -35,6 +49,12 @@ function parseArgs(argv) {
     else if (arg === '--interval-ms') options.intervalMs = Number(value());
     else if (arg === '--timeout-ms') options.timeoutMs = Number(value());
     else if (arg === '--output-dir') options.outputDir = path.resolve(value());
+    else if (arg === '--queue-dir') options.queueDir = path.resolve(value());
+    else if (arg === '--state-file') options.stateFile = path.resolve(value());
+    else if (arg === '--egress-config') options.egressConfigPath = path.resolve(value());
+    else if (arg === '--min-steady-entities') options.minSteadyEntities = Number(value());
+    else if (arg === '--extra-retry-max') options.extraRetryMax = Number(value());
+    else if (arg === '--retry-jitter-ms') options.retryJitterMs = Number(value());
     else if (arg === '--until') options.until = value();
     else if (arg === '--once') options.once = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
@@ -42,6 +62,8 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(options.intervalMs) || options.intervalMs < 1000) throw new Error('interval must be at least 1000ms');
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 1000) throw new Error('timeout must be at least 1000ms');
+  if (!Number.isFinite(options.minSteadyEntities) || options.minSteadyEntities < 0) throw new Error('min steady entities must be non-negative');
+  if (!Number.isFinite(options.extraRetryMax) || options.extraRetryMax < 0) throw new Error('extra retry max must be non-negative');
   if (options.until) {
     const untilMs = Date.parse(options.until);
     if (!Number.isFinite(untilMs)) throw new Error(`invalid --until date: ${options.until}`);
@@ -56,36 +78,48 @@ function usage() {
   return [
     'Usage: node snapshot-collector.js [options]',
     '',
-    '  --origin <url>       Game origin (default: https://grasp-rat-game.h-e.top)',
-    '  --path <path>        Snapshot path (default: /snapshot)',
-    '  --interval-ms <ms>   Poll interval (default: 30000)',
-    '  --timeout-ms <ms>    Request timeout (default: 20000)',
-    '  --output-dir <dir>   Raw snapshot output directory',
-    '  --until <date>       Stop at an ISO-8601 date/time',
-    '  --once               Fetch one snapshot and exit',
-    '  -h, --help           Show this help'
+    '  --origin <url>             Game origin (default: https://grasp-rat-game.h-e.top)',
+    '  --path <path>              Snapshot path (default: /snapshot)',
+    '  --interval-ms <ms>         Poll interval (default: 15000)',
+    '  --timeout-ms <ms>          Request timeout (default: 20000)',
+    '  --output-dir <dir>         Raw snapshot spool directory',
+    '  --queue-dir <dir>          Durable observation queue directory',
+    '  --state-file <file>        Atomic egress scheduler state file',
+    '  --egress-config <file>     JSON array of four egress labels',
+    '  --min-steady-entities <n>  Warming-up threshold (default: 900)',
+    '  --extra-retry-max <n>      Retry window limit after both groups fail',
+    '  --until <date>             Stop at an ISO-8601 date/time',
+    '  --once                     Fetch one round and exit',
+    '  -h, --help                 Show this help'
   ].join('\n');
 }
 
 function ensureDirectory(directory) {
-  fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 }
 
-function requestSnapshot(options, now = () => Date.now()) {
+function requestSnapshot(options, now = () => Date.now(), egress = null) {
   const url = new URL(options.snapshotPath, options.origin);
   const transport = url.protocol === 'http:' ? http : https;
   const startedAtMs = now();
   return new Promise((resolve, reject) => {
     const request = transport.request(url, {
       method: 'GET',
+      localAddress: egress?.localAddress,
       headers: {
         accept: 'application/json',
-        'user-agent': 'grasp-rat-open-panel-snapshot-collector/0.1'
+        'user-agent': 'grasp-rat-open-panel-snapshot-collector/1.0'
       },
       timeout: options.timeoutMs
     }, response => {
       const chunks = [];
-      response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      let bytes = 0;
+      response.on('data', chunk => {
+        const buffer = Buffer.from(chunk);
+        bytes += buffer.length;
+        if (bytes <= Number(options.maxResponseBytes || 20 * 1024 * 1024)) chunks.push(buffer);
+        else response.destroy(new Error('snapshot response exceeds configured maximum'));
+      });
       response.on('end', () => resolve({
         statusCode: response.statusCode || 0,
         headers: response.headers,
@@ -93,7 +127,7 @@ function requestSnapshot(options, now = () => Date.now()) {
         durationMs: Math.max(0, now() - startedAtMs)
       }));
     });
-    request.on('timeout', () => request.destroy(new Error(`request timeout after ${options.timeoutMs}ms`)));
+    request.on('timeout', () => request.destroy(Object.assign(new Error(`request timeout after ${options.timeoutMs}ms`), { code: 'ETIMEDOUT' })));
     request.on('error', reject);
     request.end();
   });
@@ -121,75 +155,238 @@ function safeSnapshotSummary(body) {
 }
 
 function fileTimestamp(date = new Date()) {
-  return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const iso = date.toISOString();
+  return iso.replace(/[-:]/g, '').replace(/\.([0-9]{3})Z$/, '$1Z');
 }
 
 function writeAtomically(filePath, body) {
   const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporary, body, { flag: 'wx' });
+  const fd = fs.openSync(temporary, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, body);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(temporary, filePath);
 }
 
-function persistObservation(result, options, observedAt = new Date()) {
+function persistObservation(result, options, observedAt = new Date(), context = {}) {
   ensureDirectory(options.outputDir);
-  const hash = crypto.createHash('sha256').update(result.body).digest('hex');
-  const summary = safeSnapshotSummary(result.body);
+  const body = Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.body || '');
+  const hash = crypto.createHash('sha256').update(body).digest('hex');
+  const summary = safeSnapshotSummary(body);
   const isSnapshot = result.statusCode >= 200 && result.statusCode < 300 && summary.validJson && summary.hasEntitiesArray;
-  const suffix = isSnapshot ? `${summary.tick ?? 'notick'}-${hash.slice(0, 16)}.json` : `http-${result.statusCode || 'error'}-${hash.slice(0, 16)}.bin`;
-  const fileName = `${fileTimestamp(observedAt)}-${suffix}`;
-  const filePath = path.join(options.outputDir, fileName);
-  writeAtomically(filePath, result.body);
+  const observationId = context.observationId || `obs-${crypto.randomUUID()}`;
+  let fileName = null;
+  let rawPath = null;
+  if (isSnapshot) {
+    const suffix = `${summary.tick ?? 'notick'}-${hash.slice(0, 16)}-${observationId.slice(-8)}.json`;
+    fileName = `${fileTimestamp(observedAt)}-${suffix}`;
+    rawPath = path.join(options.outputDir, fileName);
+    writeAtomically(rawPath, body);
+  }
   const metadata = {
+    observationId,
     observedAt: observedAt.toISOString(),
-    statusCode: result.statusCode,
-    durationMs: result.durationMs,
-    bytes: result.body.length,
+    receivedAt: new Date().toISOString(),
+    statusCode: result.statusCode || 0,
+    durationMs: result.durationMs ?? null,
+    bytes: body.length,
     sha256: hash,
+    payloadHash: hash,
     file: fileName,
+    rawPath,
     storedAsSnapshot: isSnapshot,
+    parseStatus: isSnapshot ? 'pending' : 'invalid',
+    egressId: context.egressId || null,
+    egressGroup: context.egressGroup || null,
+    retryNo: context.retryNo || 0,
+    failureCategory: context.failureCategory || classifyFailure(result),
+    error: context.error || null,
     ...summary
   };
   const manifestPath = path.join(options.outputDir, 'manifest.jsonl');
-  fs.appendFileSync(manifestPath, `${JSON.stringify(metadata)}\n`, { encoding: 'utf8' });
+  fs.appendFileSync(manifestPath, `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 });
   return metadata;
+}
+
+function persistRequestError(error, options, observedAt, context = {}) {
+  ensureDirectory(options.outputDir);
+  const metadata = {
+    observationId: context.observationId || `obs-${crypto.randomUUID()}`,
+    observedAt: observedAt.toISOString(),
+    receivedAt: new Date().toISOString(),
+    statusCode: 0,
+    durationMs: context.durationMs ?? null,
+    bytes: 0,
+    sha256: null,
+    payloadHash: null,
+    file: null,
+    rawPath: null,
+    storedAsSnapshot: false,
+    parseStatus: 'request_failed',
+    egressId: context.egressId || null,
+    egressGroup: context.egressGroup || null,
+    retryNo: context.retryNo || 0,
+    failureCategory: context.failureCategory || classifyFailure(null, error),
+    error: error?.message || String(error)
+  };
+  fs.appendFileSync(path.join(options.outputDir, 'manifest.jsonl'), `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 });
+  return metadata;
+}
+
+async function enqueueSnapshot(queue, metadata, body) {
+  if (!queue || !metadata.storedAsSnapshot) return null;
+  return queue.enqueue({
+    ...metadata,
+    observationId: metadata.observationId,
+    observedAt: metadata.observedAt,
+    rawPath: metadata.rawPath
+  }, body);
 }
 
 async function collectOnce(options, dependencies = {}) {
   const request = dependencies.requestSnapshot || requestSnapshot;
   const clock = dependencies.now || (() => Date.now());
   const observedAt = new Date(clock());
+  const egress = dependencies.egress || null;
+  const context = {
+    egressId: egress?.id,
+    egressGroup: egress?.group,
+    retryNo: dependencies.retryNo || 0,
+    observationId: dependencies.observationId
+  };
   try {
-    const result = await request(options, clock);
-    const metadata = persistObservation(result, options, observedAt);
-    return { ok: metadata.storedAsSnapshot, metadata };
+    const result = await request(options, clock, egress);
+    const metadata = persistObservation(result, options, observedAt, context);
+    await enqueueSnapshot(dependencies.queue, metadata, Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.body || ''));
+    return { ok: metadata.storedAsSnapshot, metadata, result };
   } catch (error) {
-    ensureDirectory(options.outputDir);
-    const metadata = { observedAt: observedAt.toISOString(), ok: false, error: error?.message || String(error) };
-    fs.appendFileSync(path.join(options.outputDir, 'manifest.jsonl'), `${JSON.stringify(metadata)}\n`);
-    return { ok: false, metadata };
+    const metadata = persistRequestError(error, options, observedAt, { ...context, failureCategory: classifyFailure(null, error) });
+    return { ok: false, metadata, error };
   }
+}
+
+async function runAttempt(options, dependencies, scheduler, egress, queue, retryNo) {
+  const clock = dependencies.now || (() => Date.now());
+  scheduler.markAttempt(egress, clock());
+  const request = dependencies.requestSnapshot || requestSnapshot;
+  const observedAt = new Date(clock());
+  let result;
+  let error = null;
+  try {
+    result = await request(options, clock, egress);
+  } catch (requestError) {
+    error = requestError;
+    result = { statusCode: 0, body: Buffer.alloc(0), durationMs: null };
+  }
+  const resultWithVersion = !error && result.body
+    ? { ...result, payloadHash: crypto.createHash('sha256').update(result.body).digest('hex') }
+    : result;
+  const failureCategory = scheduler.markResult(egress, resultWithVersion, clock(), error);
+  const metadata = error
+    ? persistRequestError(error, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory })
+    : persistObservation(result, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory });
+  if (!error && metadata.storedAsSnapshot) await enqueueSnapshot(queue, metadata, result.body);
+  return {
+    ok: Boolean(!error && metadata.storedAsSnapshot),
+    metadata,
+    result: resultWithVersion,
+    error,
+    failureCategory
+  };
+}
+
+async function runRound(options, dependencies, scheduler, queue) {
+  const clock = dependencies.now || (() => Date.now());
+  const attempted = new Set();
+  const firstGroup = scheduler.state.nextGroup === 'B' ? 'B' : 'A';
+  const groups = [firstGroup, firstGroup === 'A' ? 'B' : 'A'];
+  let lastAttempt = null;
+  for (let index = 0; index < groups.length; index += 1) {
+    const egress = scheduler.choose(groups[index], clock(), attempted);
+    if (!egress) continue;
+    attempted.add(egress.id);
+    lastAttempt = await runAttempt(options, dependencies, scheduler, egress, queue, 0);
+    if (lastAttempt.ok) return { ...lastAttempt, extraRetries: 0 };
+  }
+  let extraRetries = 0;
+  while (extraRetries < options.extraRetryMax) {
+    const egress = scheduler.chooseNext(clock(), attempted);
+    if (!egress) break;
+    attempted.add(egress.id);
+    extraRetries += 1;
+    const jitter = Number(options.retryJitterMs || 0);
+    if (jitter > 0 && dependencies.sleep) await dependencies.sleep(Math.floor(Math.random() * jitter));
+    lastAttempt = await runAttempt(options, dependencies, scheduler, egress, queue, extraRetries);
+    if (lastAttempt.ok) return { ...lastAttempt, extraRetries };
+  }
+  return { ...(lastAttempt || { ok: false, metadata: null }), extraRetries, collectorGap: true };
+}
+
+async function processQueue(queue, dependencies) {
+  if (!queue) return [];
+  const handler = dependencies.processObservation || (dependencies.engine ? async (body, item) => {
+    return dependencies.engine.applyObservation(body, {
+      observationId: item.observationId,
+      observedAt: item.observedAt,
+      rawPath: item.rawPath,
+      payloadHash: item.payloadHash,
+      bytes: item.bytes,
+      statusCode: item.statusCode,
+      durationMs: item.durationMs,
+      egressId: item.egressId,
+      egressGroup: item.egressGroup,
+      retryNo: item.retryNo
+    });
+  } : null);
+  if (!handler) return [];
+  return queue.process(handler, { maxItems: dependencies.maxQueueItems || 8 });
 }
 
 async function runCollector(options, dependencies = {}) {
   const sleep = dependencies.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const clock = dependencies.now || (() => Date.now());
+  const scheduler = dependencies.scheduler || new EgressScheduler({
+    statePath: options.stateFile,
+    egresses: options.egresses || loadEgresses(options),
+    minIpIntervalMs: options.minIpIntervalMs
+  });
+  const queue = dependencies.queue || (options.queueDir ? new DurableObservationQueue(options.queueDir) : null);
+  const recoveredQueueItems = queue?.recoverRawDirectory(options.outputDir) || 0;
   let polls = 0;
   let successes = 0;
   let failures = 0;
-  let stopped = false;
+  let extraRetries = 0;
+  let collectorGaps = 0;
   let nextPollAtMs = clock();
-  while (!stopped && clock() < options.untilMs) {
+  while (clock() < options.untilMs) {
     const waitMs = Math.max(0, nextPollAtMs - clock());
     if (waitMs > 0) await sleep(waitMs);
     if (clock() >= options.untilMs) break;
     polls += 1;
-    const result = await collectOnce(options, dependencies);
-    if (result.ok) successes += 1;
+    const round = await runRound(options, { ...dependencies, sleep }, scheduler, queue);
+    await processQueue(queue, dependencies);
+    if (round.ok) successes += 1;
     else failures += 1;
+    extraRetries += round.extraRetries || 0;
+    if (round.collectorGap) collectorGaps += 1;
     if (options.once || clock() >= options.untilMs) break;
-    nextPollAtMs += options.intervalMs;
+    nextPollAtMs = Math.max(nextPollAtMs + options.intervalMs, clock());
   }
-  return { polls, successes, failures, stoppedAt: new Date(clock()).toISOString() };
+  return {
+    polls,
+    successes,
+    failures,
+    extraRetries,
+    collectorGaps,
+    scheduler: scheduler.health(clock()),
+    queue: queue?.status() || null,
+    recoveredQueueItems,
+    diskFreeBytes: diskFreeBytes(options.outputDir),
+    stoppedAt: new Date(clock()).toISOString()
+  };
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -199,13 +396,19 @@ async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   ensureDirectory(options.outputDir);
-  const result = await runCollector(options);
+  // Production keeps projection in its own service. The opt-in embedded mode
+  // is useful for a one-process local replay/probe and never changes the
+  // collector's durable queue contract.
+  const dependencies = process.env.PANEL_EMBED_PROJECTOR === '1'
+    ? { engine: new ProjectionEngine({ minSteadyEntities: options.minSteadyEntities }) }
+    : {};
+  const result = await runCollector(options, dependencies);
   console.log(JSON.stringify({ type: 'collector-finished', outputDir: options.outputDir, ...result }));
   return result.failures && !result.successes ? 1 : 0;
 }
 
 if (require.main === module) {
-  main().then(code => process.exitCode = code).catch(error => {
+  main().then(code => { process.exitCode = code; }).catch(error => {
     console.error(error?.stack || error);
     process.exitCode = 1;
   });
@@ -214,10 +417,13 @@ if (require.main === module) {
 module.exports = {
   DEFAULT_ORIGIN,
   DEFAULT_PATH,
+  DEFAULT_INTERVAL_MS,
   parseArgs,
   safeSnapshotSummary,
   persistObservation,
   collectOnce,
   runCollector,
-  requestSnapshot
+  requestSnapshot,
+  runRound,
+  processQueue
 };

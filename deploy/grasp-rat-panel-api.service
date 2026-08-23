@@ -1,0 +1,21 @@
+[Unit]
+Description=Grasp Rat Open Panel read-only API
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
+EnvironmentFile=/home/ubuntu/grasp-rat-open-panel/.env
+Environment=PANEL_HOST=127.0.0.1
+Environment=PANEL_PORT=19317
+Environment=PANEL_STATIC_DIR=/home/ubuntu/grasp-rat-open-panel/src/frontend/dist
+ExecStart=/usr/bin/env node api/index.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

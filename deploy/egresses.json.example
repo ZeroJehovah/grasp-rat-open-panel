@@ -1,0 +1,6 @@
+[
+  { "id": "A1", "group": "A", "localAddress": "198.51.100.11" },
+  { "id": "B1", "group": "B", "localAddress": "198.51.100.12" },
+  { "id": "A2", "group": "A", "localAddress": "198.51.100.13" },
+  { "id": "B2", "group": "B", "localAddress": "198.51.100.14" }
+]

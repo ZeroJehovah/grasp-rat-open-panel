@@ -2,3 +2,8 @@ node_modules/
 *.log
 data/
 .collector-state/
+.env
+deploy/egresses.json
+frontend/dist/
+test-results/
+playwright-report/

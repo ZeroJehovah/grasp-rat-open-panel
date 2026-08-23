@@ -2,13 +2,52 @@
   "name": "grasp-rat-open-panel-collector",
   "version": "0.1.0",
   "private": true,
-  "description": "Raw snapshot collector for the open Grasp Rat panel",
+  "description": "Read-only Grasp Rat panel collector, structured projector, API and SPA",
   "type": "commonjs",
   "scripts": {
-    "test": "node test/snapshot-collector.test.js",
-    "collect:once": "node snapshot-collector.js --once"
+    "test": "node test/snapshot-collector.test.js && node test/collector.test.js && node test/domain.test.js && node test/api.test.js && node test/retention.test.js",
+    "collect:once": "node snapshot-collector.js --once",
+    "replay": "node commands/replay-snapshots.js",
+    "migrate": "node commands/migrate.js",
+    "projector": "node commands/projector-worker.js",
+    "finalize-day": "node commands/finalize-day.js",
+    "refresh-map": "node commands/refresh-map-metadata.js",
+    "retention": "node commands/retention.js",
+    "api": "node api/index.js",
+    "frontend:dev": "vite --config frontend/vite.config.ts",
+    "frontend:build": "vite build --config frontend/vite.config.ts",
+    "e2e": "playwright test",
+    "build": "npm run frontend:build",
+    "typecheck": "tsc --noEmit -p frontend/tsconfig.json",
+    "lint": "eslint frontend/src frontend/*.ts",
+    "check": "npm test && npm run typecheck && npm run lint && npm run frontend:build"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@fastify/static": "7.0.4",
+    "fastify": "4.28.1",
+    "lucide-react": "0.468.0",
+    "pg": "8.13.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.15.0",
+    "@playwright/test": "1.48.2",
+    "@types/node": "22.10.1",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@typescript-eslint/eslint-plugin": "8.18.0",
+    "@typescript-eslint/parser": "8.18.0",
+    "@vitejs/plugin-react": "4.3.4",
+    "eslint": "9.15.0",
+    "eslint-plugin-react-hooks": "5.1.0",
+    "typescript": "5.7.2",
+    "vite": "6.0.5"
+  },
+  "overrides": {
+    "toad-cache": "3.7.0"
   }
 }

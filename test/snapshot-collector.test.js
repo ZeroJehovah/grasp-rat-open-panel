@@ -40,7 +40,7 @@ assert.deepStrictEqual(safeSnapshotSummary(payload), {
 
 (async () => {
   const outputDir = tempDir();
-  const options = parseArgs(['--once', '--output-dir', outputDir]);
+  const options = parseArgs(['--once', '--output-dir', outputDir, '--state-file', path.join(outputDir, 'collector-state.json'), '--queue-dir', path.join(outputDir, 'queue')]);
   const result = await collectOnce(options, {
     now: () => 1_700_000_000_000,
     requestSnapshot: async () => ({ statusCode: 200, body: payload, durationMs: 12 })

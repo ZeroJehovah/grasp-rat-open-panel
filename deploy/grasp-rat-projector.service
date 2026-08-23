@@ -1,0 +1,20 @@
+[Unit]
+Description=Grasp Rat Open Panel durable snapshot projector
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/grasp-rat-open-panel/src
+EnvironmentFile=/home/ubuntu/grasp-rat-open-panel/.env
+Environment=PANEL_MAP_METADATA_FILE=/home/ubuntu/grasp-rat-open-panel/data/map-metadata.json
+ExecStart=/usr/bin/env node commands/projector-worker.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/home/ubuntu/grasp-rat-open-panel/data
+
+[Install]
+WantedBy=default.target
