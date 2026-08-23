@@ -121,6 +121,7 @@ function RangeControls({ meta }: { meta: MetaResponse | null }) {
     rangeStore.set({ preset, ...next });
   };
   const updateDate = (field: 'from' | 'to', value: string) => {
+    if (value && !(meta?.availableDates || []).includes(value)) return;
     const next = { ...range, preset: 'custom' as const, [field]: value };
     if (next.from && next.to && next.from > next.to) return;
     rangeStore.set(next);
@@ -133,7 +134,7 @@ function RangeControls({ meta }: { meta: MetaResponse | null }) {
         return <button key={value} className={range.preset === value ? 'preset active' : 'preset'} onClick={() => setPreset(value)} disabled={!available} title={available ? undefined : '当前没有覆盖该范围的历史数据'}>{label}</button>;
       })}
     </div>
-    <div className="date-fields"><label>起始日<input type="date" min={meta?.earliestDate || undefined} max={meta?.latestDate || undefined} value={range.from} onChange={event => updateDate('from', event.target.value)} /></label><span>→</span><label>结束日<input type="date" min={meta?.earliestDate || undefined} max={meta?.latestDate || undefined} value={range.to} onChange={event => updateDate('to', event.target.value)} /></label></div>
+    <div className="date-fields"><label>起始日<input type="date" list="available-business-dates" min={meta?.earliestDate || undefined} max={meta?.latestDate || undefined} value={range.from} onChange={event => updateDate('from', event.target.value)} /></label><span>→</span><label>结束日<input type="date" list="available-business-dates" min={meta?.earliestDate || undefined} max={meta?.latestDate || undefined} value={range.to} onChange={event => updateDate('to', event.target.value)} /></label><datalist id="available-business-dates">{(meta?.availableDates || []).map(date => <option key={date} value={date} />)}</datalist></div>
     <p className="micro-note">可用数据：{meta?.earliestDate || '--'} 至 {meta?.latestDate || '--'} · {meta?.timezone || 'Asia/Shanghai'}</p>
   </section>;
 }

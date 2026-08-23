@@ -375,6 +375,15 @@ function presetRangesForDates(latestDate, availableDates = []) {
   return ranges;
 }
 
+function isDateRangeCovered(range, availableDates = []) {
+  if (!range?.from || !range?.to || range.from > range.to || !Array.isArray(availableDates)) return false;
+  const available = new Set(availableDates.map(value => String(value).slice(0, 10)));
+  for (let date = range.from; date <= range.to; date = addDays(date, 1)) {
+    if (!available.has(date)) return false;
+  }
+  return true;
+}
+
 module.exports = {
   BUSINESS_TIMEZONE,
   DAY_MS,
@@ -398,5 +407,6 @@ module.exports = {
   addDays,
   DATE_PRESET_KEYS,
   presetRangesForDates,
+  isDateRangeCovered,
   cloneJson
 };

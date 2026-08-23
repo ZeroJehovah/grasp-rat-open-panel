@@ -81,5 +81,12 @@ function fixture() {
   assert.strictEqual(oversized.statusCode, 413);
   assert.strictEqual(oversized.json().error, 'history_result_limit');
   await oversizedApp.close();
+  const gapApp = await buildServer({ store: {
+    getMeta: async () => ({ earliestDate: '2026-08-21', latestDate: '2026-08-23', availableDates: ['2026-08-21', '2026-08-23'] }),
+    getHistory: async () => ({ from: '2026-08-21', to: '2026-08-23', players: [], messages: [], kills: [], dailyQuota: [], stats: [] })
+  } });
+  const gap = await gapApp.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-21&to=2026-08-23' });
+  assert.strictEqual(gap.statusCode, 416);
+  await gapApp.close();
   console.log('api tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

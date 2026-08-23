@@ -8,7 +8,7 @@ const fastifyCompress = require('@fastify/compress');
 const { ProjectionEngine } = require('../domain/projector');
 const { HISTORY_ROW_LIMITS, PostgresPanelStore } = require('../storage/postgres-store');
 const { collectorHealth } = require('../collector/health');
-const { BUSINESS_TIMEZONE, SCHEMA_VERSION, businessDateRange } = require('../domain/snapshot');
+const { BUSINESS_TIMEZONE, SCHEMA_VERSION, businessDateRange, isDateRangeCovered } = require('../domain/snapshot');
 
 function etagFor(payload) {
   return `"${crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')}"`;
@@ -114,7 +114,8 @@ async function buildServer(options = {}) {
       return reply.code(400).send({ error: 'invalid_date_range', message: error.message, generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
     }
     const meta = await store.getMeta();
-    if (meta.earliestDate && range.from < meta.earliestDate || meta.latestDate && range.to > meta.latestDate) {
+    const availableDates = Array.isArray(meta.availableDates) ? meta.availableDates : null;
+    if (meta.earliestDate && range.from < meta.earliestDate || meta.latestDate && range.to > meta.latestDate || availableDates && !isDateRangeCovered(range, availableDates)) {
       return reply.code(416).send({ error: 'date_range_unavailable', earliestDate: meta.earliestDate, latestDate: meta.latestDate, generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
     }
     let history;

@@ -1,10 +1,12 @@
 'use strict';
 
 const assert = require('assert');
-const { addDays, parseSnapshot, presetRangesForDates } = require('../domain/snapshot');
+const { addDays, isDateRangeCovered, parseSnapshot, presetRangesForDates } = require('../domain/snapshot');
 const { ProjectionEngine } = require('../domain/projector');
 
 assert.strictEqual(addDays('2024-02-28', 1), '2024-02-29');
+assert.strictEqual(isDateRangeCovered({ from: '2026-08-21', to: '2026-08-23' }, ['2026-08-21', '2026-08-22', '2026-08-23']), true);
+assert.strictEqual(isDateRangeCovered({ from: '2026-08-21', to: '2026-08-23' }, ['2026-08-21', '2026-08-23']), false);
 assert.deepStrictEqual(presetRangesForDates('2026-08-23', [
   '2026-08-17', '2026-08-18', '2026-08-19', '2026-08-20', '2026-08-21', '2026-08-22', '2026-08-23'
 ]), {
