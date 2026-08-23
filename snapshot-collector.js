@@ -7,7 +7,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 
-const { EgressScheduler, loadEgresses, classifyFailure } = require('./collector/egress');
+const { EgressScheduler, loadEgressPlan, classifyFailure } = require('./collector/egress');
 const { DurableObservationQueue } = require('./collector/queue');
 const { ProjectionEngine } = require('./domain/projector');
 const { diskFreeBytes } = require('./collector/health');
@@ -35,6 +35,7 @@ function parseArgs(argv) {
     extraRetryMax: Number(process.env.GRASP_RAT_PANEL_EXTRA_RETRY_MAX || 1),
     retryJitterMs: Number(process.env.GRASP_RAT_PANEL_RETRY_JITTER_MS || 250),
     extraRetryWindowMs: Number(process.env.GRASP_RAT_PANEL_EXTRA_RETRY_WINDOW_MS || 10_000),
+    benchmarkRetryMs: Number(process.env.GRASP_RAT_PANEL_EGRESS_BENCHMARK_RETRY_MS || 5 * 60_000),
     once: false,
     help: false
   };
@@ -57,6 +58,7 @@ function parseArgs(argv) {
     else if (arg === '--extra-retry-max') options.extraRetryMax = Number(value());
     else if (arg === '--retry-jitter-ms') options.retryJitterMs = Number(value());
     else if (arg === '--extra-retry-window-ms') options.extraRetryWindowMs = Number(value());
+    else if (arg === '--benchmark-retry-ms') options.benchmarkRetryMs = Number(value());
     else if (arg === '--until') options.until = value();
     else if (arg === '--once') options.once = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
@@ -92,6 +94,7 @@ function usage() {
     '  --min-steady-entities <n>  Warming-up threshold (default: 900)',
     '  --extra-retry-max <n>      Retry window limit after both groups fail',
     '  --extra-retry-window-ms <n> Maximum total time for extra retries',
+    '  --benchmark-retry-ms <n>   Retry delay when no daily benchmark egress succeeds',
     '  --until <date>             Stop at an ISO-8601 date/time',
     '  --once                     Fetch one round and exit',
     '  -h, --help                 Show this help'
@@ -288,7 +291,7 @@ async function collectOnce(options, dependencies = {}) {
   }
 }
 
-async function runAttempt(options, dependencies, scheduler, egress, queue, retryNo) {
+async function runAttempt(options, dependencies, scheduler, egress, queue, retryNo, context = {}) {
   const clock = dependencies.now || (() => Date.now());
   scheduler.markAttempt(egress, clock());
   const request = dependencies.requestSnapshot || requestSnapshot;
@@ -304,7 +307,7 @@ async function runAttempt(options, dependencies, scheduler, egress, queue, retry
   const resultWithVersion = !error && result.body
     ? { ...result, payloadHash: crypto.createHash('sha256').update(result.body).digest('hex') }
     : result;
-  const failureCategory = scheduler.markResult(egress, resultWithVersion, clock(), error);
+  const failureCategory = scheduler.markResult(egress, resultWithVersion, clock(), error, context);
   const metadata = error
     ? persistRequestError(error, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory })
     : persistObservation(result, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory });
@@ -316,6 +319,74 @@ async function runAttempt(options, dependencies, scheduler, egress, queue, retry
     error,
     failureCategory
   };
+}
+
+function businessDateAt(value = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date(value));
+  const fields = Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+}
+
+function benchmarkSelection(results, scheduler) {
+  const successful = results
+    .filter(result => result.success)
+    .sort((a, b) => Number(a.durationMs ?? Number.MAX_SAFE_INTEGER) - Number(b.durationMs ?? Number.MAX_SAFE_INTEGER) || a.id.localeCompare(b.id));
+  const selected = [];
+  const selectedIds = new Set();
+  for (const group of ['A', 'B']) {
+    for (const result of successful.filter(item => item.group === group).slice(0, scheduler.activePerGroup)) {
+      if (selected.length >= scheduler.activeCount) break;
+      selected.push(result);
+      selectedIds.add(result.id);
+    }
+  }
+  for (const result of successful) {
+    if (selected.length >= scheduler.activeCount) break;
+    if (!selectedIds.has(result.id)) {
+      selected.push(result);
+      selectedIds.add(result.id);
+    }
+  }
+  return selected.map(result => result.id);
+}
+
+async function runEgressBenchmark(options, dependencies, scheduler, queue) {
+  const clock = dependencies.now || (() => Date.now());
+  const sleep = dependencies.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const businessDate = businessDateAt(clock());
+  const results = [];
+  for (const egress of scheduler.egresses) {
+    const state = scheduler.stateFor(egress);
+    const waitMs = Math.max(0, Number(state?.next_eligible_at || 0) - clock());
+    if (waitMs > 0) await sleep(waitMs);
+    const startedAt = clock();
+    const attempt = await runAttempt(options, dependencies, scheduler, egress, queue, 0, { benchmark: true });
+    const statusCode = attempt.result?.statusCode || attempt.metadata?.statusCode || 0;
+    const success = Boolean(!attempt.error && statusCode >= 200 && statusCode < 300 && attempt.metadata?.validSnapshot);
+    results.push({
+      id: egress.id,
+      group: egress.group,
+      localAddress: egress.localAddress || null,
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date(clock()).toISOString(),
+      statusCode,
+      durationMs: attempt.result?.durationMs ?? attempt.metadata?.durationMs ?? null,
+      bytes: attempt.metadata?.bytes ?? 0,
+      validSnapshot: Boolean(attempt.metadata?.validSnapshot),
+      success,
+      failureCategory: attempt.failureCategory || null
+    });
+  }
+  const selectedIds = benchmarkSelection(results, scheduler);
+  const completedAt = clock();
+  if (selectedIds.length > 0) scheduler.setDailySelection(businessDate, selectedIds, completedAt, results);
+  else scheduler.recordBenchmarkAttempt(completedAt, results);
+  return { businessDate, results, selectedIds, completedAt: new Date(completedAt).toISOString() };
 }
 
 async function runRound(options, dependencies, scheduler, queue) {
@@ -373,9 +444,15 @@ async function processQueue(queue, dependencies) {
 async function runCollector(options, dependencies = {}) {
   const sleep = dependencies.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const clock = dependencies.now || (() => Date.now());
+  const egressPlan = options.egressPlan || loadEgressPlan(options);
   const scheduler = dependencies.scheduler || new EgressScheduler({
     statePath: options.stateFile,
-    egresses: options.egresses || loadEgresses(options),
+    egresses: options.egresses || egressPlan.egresses,
+    egressPlan,
+    dailyBenchmark: options.dailyBenchmark,
+    activePerGroup: options.activePerGroup,
+    activeCount: options.activeCount,
+    benchmarkRetryMs: options.benchmarkRetryMs,
     minIpIntervalMs: options.minIpIntervalMs
   });
   const queue = dependencies.queue || (options.queueDir ? new DurableObservationQueue(options.queueDir) : null);
@@ -390,6 +467,27 @@ async function runCollector(options, dependencies = {}) {
     const waitMs = Math.max(0, nextPollAtMs - clock());
     if (waitMs > 0) await sleep(waitMs);
     if (clock() >= options.untilMs) break;
+    const businessDate = businessDateAt(clock());
+    if (scheduler.needsDailyBenchmark?.(businessDate, clock())) {
+      scheduler.prepareDailyBenchmark?.(businessDate, clock());
+      const benchmark = await runEgressBenchmark(options, { ...dependencies, sleep }, scheduler, queue);
+      await processQueue(queue, dependencies);
+      if (benchmark.selectedIds.length === 0) {
+        failures += 1;
+        collectorGaps += 1;
+        if (dependencies.onCollectorGap) await dependencies.onCollectorGap({
+          type: 'egress_benchmark_failed',
+          at: new Date(clock()).toISOString(),
+          businessDate,
+          candidates: benchmark.results.length
+        });
+        nextPollAtMs = clock() + Number(scheduler.benchmarkRetryMs || 5 * 60_000);
+      } else {
+        nextPollAtMs = scheduler.nextEligibleAt(clock());
+      }
+      if (options.once || clock() >= options.untilMs) break;
+      continue;
+    }
     polls += 1;
     const round = await runRound(options, { ...dependencies, sleep }, scheduler, queue);
     await processQueue(queue, dependencies);
@@ -454,6 +552,9 @@ module.exports = {
   safeSnapshotSummary,
   persistObservation,
   collectOnce,
+  businessDateAt,
+  benchmarkSelection,
+  runEgressBenchmark,
   runCollector,
   requestSnapshot,
   runRound,

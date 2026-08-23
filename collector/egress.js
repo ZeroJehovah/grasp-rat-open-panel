@@ -13,6 +13,9 @@ const DEFAULT_EGRESSES = [
 const DEFAULT_MIN_IP_INTERVAL_MS = 30_001;
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const DEFAULT_MAX_COOLDOWN_MS = 60 * 60_000;
+const DEFAULT_ACTIVE_PER_GROUP = 2;
+const DEFAULT_ACTIVE_COUNT = 4;
+const DEFAULT_BENCHMARK_RETRY_MS = 5 * 60_000;
 
 function atomicWriteJson(filePath, value, mode = 0o600) {
   const directory = path.dirname(filePath);
@@ -38,6 +41,9 @@ function normalizeEgresses(value) {
   if (typeof value === 'string') {
     try { entries = JSON.parse(value); } catch (_) { entries = null; }
   }
+  if (entries && !Array.isArray(entries) && typeof entries === 'object') {
+    entries = entries.egresses || entries.candidates || entries.items;
+  }
   if (!Array.isArray(entries) || entries.length === 0) entries = DEFAULT_EGRESSES;
   const normalized = entries.map((entry, index) => ({
     id: String(entry.id || entry.egress_id || `egress-${index + 1}`),
@@ -48,11 +54,43 @@ function normalizeEgresses(value) {
   return normalized.length ? normalized : DEFAULT_EGRESSES.slice();
 }
 
+function normalizeEgressPlan(value) {
+  let config = value;
+  if (typeof config === 'string') {
+    try { config = JSON.parse(config); } catch (_) { config = null; }
+  }
+  const isObjectConfig = config && !Array.isArray(config) && typeof config === 'object';
+  const selection = isObjectConfig && config.selection && typeof config.selection === 'object'
+    ? config.selection
+    : {};
+  const egresses = normalizeEgresses(config);
+  const activePerGroup = Number(selection.activePerGroup || config?.activePerGroup || DEFAULT_ACTIVE_PER_GROUP);
+  const activeCount = Number(selection.activeCount || config?.activeCount || DEFAULT_ACTIVE_COUNT);
+  return {
+    egresses,
+    dailyBenchmark: Boolean(isObjectConfig && (config.dailyBenchmark || selection.mode === 'daily-fastest')),
+    activePerGroup: Number.isFinite(activePerGroup) && activePerGroup > 0 ? Math.floor(activePerGroup) : DEFAULT_ACTIVE_PER_GROUP,
+    activeCount: Number.isFinite(activeCount) && activeCount > 0 ? Math.floor(activeCount) : DEFAULT_ACTIVE_COUNT,
+    benchmarkRetryMs: Number.isFinite(Number(selection.retryMs || config?.benchmarkRetryMs))
+      ? Math.max(1_000, Number(selection.retryMs || config.benchmarkRetryMs))
+      : DEFAULT_BENCHMARK_RETRY_MS
+  };
+}
+
+function readConfiguredEgressValue(options = {}) {
+  if (options.egressPlan) return options.egressPlan;
+  if (options.egresses) return options.egresses;
+  if (options.egressConfigPath) return readJson(options.egressConfigPath, null);
+  if (process.env.GRASP_RAT_PANEL_EGRESS_JSON) return process.env.GRASP_RAT_PANEL_EGRESS_JSON;
+  return DEFAULT_EGRESSES;
+}
+
+function loadEgressPlan(options = {}) {
+  return normalizeEgressPlan(readConfiguredEgressValue(options));
+}
+
 function loadEgresses(options = {}) {
-  if (options.egresses) return normalizeEgresses(options.egresses);
-  if (options.egressConfigPath) return normalizeEgresses(readJson(options.egressConfigPath, null));
-  if (process.env.GRASP_RAT_PANEL_EGRESS_JSON) return normalizeEgresses(process.env.GRASP_RAT_PANEL_EGRESS_JSON);
-  return DEFAULT_EGRESSES.slice();
+  return loadEgressPlan(options).egresses;
 }
 
 function classifyFailure(result, error = null) {
@@ -70,14 +108,35 @@ function classifyFailure(result, error = null) {
 
 class EgressScheduler {
   constructor(options = {}) {
-    this.egresses = normalizeEgresses(options.egresses || loadEgresses(options));
+    const plan = options.egressPlan || loadEgressPlan(options);
+    this.egresses = normalizeEgresses(options.egresses || plan.egresses);
+    this.dailyBenchmark = options.dailyBenchmark === undefined ? plan.dailyBenchmark : Boolean(options.dailyBenchmark);
+    this.activePerGroup = Number(options.activePerGroup || plan.activePerGroup || DEFAULT_ACTIVE_PER_GROUP);
+    this.activeCount = Number(options.activeCount || plan.activeCount || DEFAULT_ACTIVE_COUNT);
+    this.benchmarkRetryMs = Number(options.benchmarkRetryMs || plan.benchmarkRetryMs || DEFAULT_BENCHMARK_RETRY_MS);
     this.statePath = options.statePath || options.stateFile || null;
     this.minIpIntervalMs = Number(options.minIpIntervalMs || DEFAULT_MIN_IP_INTERVAL_MS);
     this.cooldownMs = Number(options.cooldownMs || DEFAULT_COOLDOWN_MS);
     this.maxCooldownMs = Number(options.maxCooldownMs || DEFAULT_MAX_COOLDOWN_MS);
-    const initial = { nextGroup: 'A', consecutiveFailures: 0, egresses: {} };
+    const initial = {
+      nextGroup: 'A',
+      consecutiveFailures: 0,
+      egresses: {},
+      activeEgressIds: [],
+      runtimeActiveEgressIds: [],
+      selectionBusinessDate: null,
+      lastBenchmarkAttemptAt: null,
+      benchmark: null
+    };
     this.state = readJson(this.statePath, initial);
     if (!this.state.egresses || typeof this.state.egresses !== 'object') this.state = initial;
+    if (!this.state.nextGroup) this.state.nextGroup = 'A';
+    if (!Array.isArray(this.state.activeEgressIds)) this.state.activeEgressIds = [];
+    if (!Array.isArray(this.state.runtimeActiveEgressIds)) {
+      this.state.runtimeActiveEgressIds = this.dailyBenchmark
+        ? this.state.activeEgressIds.slice()
+        : this.egresses.map(egress => egress.id);
+    }
     for (const egress of this.egresses) {
       if (!this.state.egresses[egress.id]) this.state.egresses[egress.id] = {
         id: egress.id,
@@ -90,8 +149,13 @@ class EgressScheduler {
         probe_required: false,
         probe_in_flight: false,
         consecutive_failures: 0,
-        last_version: null
+        last_version: null,
+        last_benchmark_duration_ms: null,
+        last_benchmark_success: false
       };
+    }
+    if (!this.dailyBenchmark && this.state.runtimeActiveEgressIds.length === 0) {
+      this.state.runtimeActiveEgressIds = this.egresses.map(egress => egress.id);
     }
     this.persist();
   }
@@ -104,15 +168,99 @@ class EgressScheduler {
     return this.state.egresses[egress.id];
   }
 
+  runtimePoolIds() {
+    const configured = new Set(this.egresses.map(egress => egress.id));
+    const ids = this.dailyBenchmark ? this.state.runtimeActiveEgressIds : this.egresses.map(egress => egress.id);
+    return new Set((Array.isArray(ids) ? ids : []).filter(id => configured.has(id)));
+  }
+
+  needsDailyBenchmark(businessDate, now = Date.now()) {
+    if (!this.dailyBenchmark) return false;
+    if (this.state.selectionBusinessDate === businessDate && this.runtimePoolIds().size > 0) return false;
+    const lastAttempt = Date.parse(this.state.lastBenchmarkAttemptAt || '');
+    return !Number.isFinite(lastAttempt) || now - lastAttempt >= this.benchmarkRetryMs;
+  }
+
+  prepareDailyBenchmark(businessDate, at = Date.now()) {
+    if (!this.dailyBenchmark) return;
+    if (this.state.selectionBusinessDate !== businessDate) {
+      this.state.selectionBusinessDate = null;
+      this.state.activeEgressIds = [];
+      this.state.runtimeActiveEgressIds = [];
+      this.state.lastBenchmarkAttemptAt = null;
+      this.state.benchmark = null;
+    }
+    this.state.benchmarkStartedAt = new Date(at).toISOString();
+    this.persist();
+  }
+
+  recordBenchmarkAttempt(at = Date.now(), results = []) {
+    this.state.lastBenchmarkAttemptAt = new Date(at).toISOString();
+    this.state.benchmark = {
+      completedAt: new Date(at).toISOString(),
+      results: Array.isArray(results) ? results : []
+    };
+    for (const result of results) {
+      const egress = this.egresses.find(candidate => candidate.id === result.id);
+      if (!egress) continue;
+      const state = this.stateFor(egress);
+      state.last_benchmark_duration_ms = result.durationMs ?? null;
+      state.last_benchmark_success = Boolean(result.success);
+    }
+    this.persist();
+  }
+
+  setDailySelection(businessDate, selectedIds, at = Date.now(), results = []) {
+    const configured = new Set(this.egresses.map(egress => egress.id));
+    const ids = Array.from(new Set((selectedIds || []).filter(id => configured.has(id)))).slice(0, this.activeCount);
+    this.state.selectionBusinessDate = businessDate;
+    this.state.activeEgressIds = ids;
+    this.state.runtimeActiveEgressIds = ids.slice();
+    this.recordBenchmarkAttempt(at, results);
+    this.persist();
+    return ids;
+  }
+
+  rotateAfterFailure(egress, now = Date.now()) {
+    if (!this.dailyBenchmark) return null;
+    const current = this.runtimePoolIds();
+    if (!current.has(egress.id)) return null;
+    const excluded = new Set(current);
+    const available = candidate => {
+      const state = this.stateFor(candidate);
+      return !excluded.has(candidate.id)
+        && state
+        && !state.probe_required
+        && now >= Number(state.cooldown_until || 0);
+    };
+    const candidates = this.egresses.filter(available);
+    candidates.sort((a, b) => {
+      const sameGroup = Number(b.group === egress.group) - Number(a.group === egress.group);
+      if (sameGroup) return sameGroup;
+      const ad = Number(this.stateFor(a).last_benchmark_duration_ms ?? Number.MAX_SAFE_INTEGER);
+      const bd = Number(this.stateFor(b).last_benchmark_duration_ms ?? Number.MAX_SAFE_INTEGER);
+      return ad - bd || a.id.localeCompare(b.id);
+    });
+    const replacement = candidates[0] || null;
+    const next = Array.from(current).filter(id => id !== egress.id);
+    if (replacement) next.push(replacement.id);
+    this.state.runtimeActiveEgressIds = next;
+    this.persist();
+    return replacement;
+  }
+
   choose(group, now = Date.now(), excluded = new Set()) {
+    const pool = this.runtimePoolIds();
     const candidates = this.egresses.filter(egress => {
       const state = this.stateFor(egress);
-      return egress.group === group && !excluded.has(egress.id) && state && now >= Number(state.next_eligible_at || 0) && now >= Number(state.cooldown_until || 0);
+      return egress.group === group && pool.has(egress.id) && !excluded.has(egress.id) && state && now >= Number(state.next_eligible_at || 0) && now >= Number(state.cooldown_until || 0);
     });
     candidates.sort((a, b) => {
       const sa = this.stateFor(a);
       const sb = this.stateFor(b);
-      return Number(sa.last_attempt_at || 0) - Number(sb.last_attempt_at || 0) || a.id.localeCompare(b.id);
+      return Number(sa.last_attempt_at || 0) - Number(sb.last_attempt_at || 0)
+        || Number(sa.last_benchmark_duration_ms ?? Number.MAX_SAFE_INTEGER) - Number(sb.last_benchmark_duration_ms ?? Number.MAX_SAFE_INTEGER)
+        || a.id.localeCompare(b.id);
     });
     return candidates[0] || null;
   }
@@ -131,7 +279,7 @@ class EgressScheduler {
     this.persist();
   }
 
-  markResult(egress, result, now = Date.now(), error = null) {
+  markResult(egress, result, now = Date.now(), error = null, context = {}) {
     const state = this.stateFor(egress);
     const failureCategory = classifyFailure(result, error);
     if (!failureCategory && result?.statusCode >= 200 && result.statusCode < 300) {
@@ -153,6 +301,7 @@ class EgressScheduler {
         state.probe_required = true;
       }
       state.probe_in_flight = false;
+      if (!context.benchmark) this.rotateAfterFailure(egress, now);
     }
     this.state.nextGroup = egress.group === 'A' ? 'B' : 'A';
     this.persist();
@@ -160,7 +309,9 @@ class EgressScheduler {
   }
 
   nextEligibleAt(now = Date.now()) {
-    return Math.min(...this.egresses.map(egress => {
+    const pool = this.runtimePoolIds();
+    if (pool.size === 0) return now + this.benchmarkRetryMs;
+    return Math.min(...this.egresses.filter(egress => pool.has(egress.id)).map(egress => {
       const state = this.stateFor(egress);
       return Math.max(Number(state.next_eligible_at || 0), Number(state.cooldown_until || 0), now);
     }));
@@ -170,10 +321,11 @@ class EgressScheduler {
     let availableA = 0;
     let availableB = 0;
     let cooling = 0;
+    const pool = this.runtimePoolIds();
     for (const egress of this.egresses) {
       const state = this.stateFor(egress);
       if (Number(state.cooldown_until || 0) > now) cooling += 1;
-      else if (!state.probe_required && Number(state.next_eligible_at || 0) <= now) {
+      else if (pool.has(egress.id) && !state.probe_required && Number(state.next_eligible_at || 0) <= now) {
         if (egress.group === 'A') availableA += 1;
         else availableB += 1;
       }
@@ -183,7 +335,13 @@ class EgressScheduler {
       coolingEgressCount: cooling,
       healthProbeEgressCount: this.egresses.filter(egress => this.stateFor(egress).probe_required).length,
       consecutiveFailures: Number(this.state.consecutiveFailures || 0),
-      nextEligibleAt: this.nextEligibleAt(now)
+      nextEligibleAt: this.nextEligibleAt(now),
+      dailyBenchmark: this.dailyBenchmark,
+      candidateEgressCount: this.egresses.length,
+      activeEgressIds: this.state.activeEgressIds || [],
+      runtimeActiveEgressIds: Array.from(pool),
+      selectionBusinessDate: this.state.selectionBusinessDate || null,
+      lastBenchmarkAttemptAt: this.state.lastBenchmarkAttemptAt || null
     };
   }
 }
@@ -191,8 +349,13 @@ class EgressScheduler {
 module.exports = {
   DEFAULT_EGRESSES,
   DEFAULT_MIN_IP_INTERVAL_MS,
+  DEFAULT_ACTIVE_PER_GROUP,
+  DEFAULT_ACTIVE_COUNT,
+  DEFAULT_BENCHMARK_RETRY_MS,
   normalizeEgresses,
+  normalizeEgressPlan,
   loadEgresses,
+  loadEgressPlan,
   classifyFailure,
   EgressScheduler,
   atomicWriteJson

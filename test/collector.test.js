@@ -7,10 +7,40 @@ const path = require('path');
 const { collectorHealth } = require('../collector/health');
 const { EgressScheduler } = require('../collector/egress');
 const { DurableObservationQueue } = require('../collector/queue');
-const { collectOnce, parseArgs, runCollector, runRound } = require('../snapshot-collector');
+const { collectOnce, parseArgs, runCollector, runRound, benchmarkSelection } = require('../snapshot-collector');
 
 function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-rat-egress-')); }
 const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2', group: 'A' }, { id: 'B2', group: 'B' }];
+
+(() => {
+  const candidates = [
+    { id: 'A1', group: 'A' }, { id: 'B1', group: 'B' },
+    { id: 'A2', group: 'A' }, { id: 'B2', group: 'B' },
+    { id: 'A3', group: 'A' }, { id: 'B3', group: 'B' }
+  ];
+  const scheduler = new EgressScheduler({
+    statePath: path.join(tempDir(), 'state.json'),
+    egresses: candidates,
+    egressPlan: { dailyBenchmark: true, selection: { mode: 'daily-fastest', activePerGroup: 2, activeCount: 4 } }
+  });
+  const benchmark = candidates.map(egress => ({
+    id: egress.id,
+    group: egress.group,
+    durationMs: { A1: 40, A2: 10, A3: 20, B1: 30, B2: 5, B3: 15 }[egress.id],
+    success: true,
+    statusCode: 200,
+    validSnapshot: true,
+    bytes: 1
+  }));
+  assert.deepStrictEqual(benchmarkSelection(benchmark, scheduler), ['A2', 'A3', 'B2', 'B3']);
+  scheduler.setDailySelection('2026-08-23', ['A2', 'A3', 'B2', 'B3'], 0, benchmark);
+  const failed = candidates.find(egress => egress.id === 'A2');
+  scheduler.markAttempt(failed, 1);
+  scheduler.markResult(failed, { statusCode: 502, body: Buffer.from('bad gateway') }, 2);
+  assert.ok(scheduler.runtimePoolIds().has('A1'), 'failed active egress should be replaced from the candidate pool');
+  assert.ok(!scheduler.runtimePoolIds().has('A2'));
+  console.log('daily egress benchmark and runtime rotation tests passed');
+})();
 
 (() => {
   const statePath = path.join(tempDir(), 'state.json');

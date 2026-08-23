@@ -7,7 +7,7 @@ panel deployment does not interrupt collection.
 ## Runtime flow
 
 ```text
-snapshot collector (A1/A2 + B1/B2, 15s single-flight)
+snapshot collector (daily candidate benchmark -> A/B active pool, 15s single-flight)
   -> raw 24h spool + durable queue
   -> validator / version deduplicator / projector
   -> PostgreSQL facts and current materializations
@@ -46,15 +46,21 @@ lifecycle objects, with a successful base+delta rebuild check.
 ## Services
 
 1. Copy `deploy/egresses.json.example` to a private `egresses.json` and replace
-   the example addresses with the four configured local IPv4 bind addresses.
+   the example addresses with every configured local IPv4 bind address. With
+   `dailyBenchmark: true`, the collector requests `/snapshot` once from each
+   candidate at the start of the Asia/Shanghai business day, records status and
+   duration, and activates the fastest successful A/B batch. A failed active
+   egress is temporarily replaced from the remaining candidates.
 2. Create a private `.env` containing `DATABASE_URL` and run `npm run migrate`.
 3. Build the SPA with `npm run frontend:build`.
 4. Install and enable the collector, projector, API, retention and health
-   units/timers in `deploy/`. The health timer checks collector freshness,
+   units/timers in `deploy/` with the system systemd manager (the units contain
+   `User=ubuntu`). The health timer checks collector freshness,
    queue/disk pressure, egress availability, API status and database version
    lag; a failed check is visible as a failed systemd unit and journald entry.
-   The Cloudflare example exposes only the local API; credentials stay outside
-   this repository.
+   The `grasp-rat-open-panel-cloudflared.service` unit exposes only the local
+   API through the configured hostname; the tunnel token stays outside this
+   repository.
 
 The panel API defaults to `127.0.0.1:19317`; this intentionally avoids the
 existing CPAMP management service on port `18317` on the deployment host.

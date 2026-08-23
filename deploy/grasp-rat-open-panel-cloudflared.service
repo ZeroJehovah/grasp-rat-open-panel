@@ -1,0 +1,15 @@
+[Unit]
+Description=Cloudflare Tunnel for Grasp Rat Open Panel
+Wants=network-online.target
+After=network-online.target grasp-rat-panel-api.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --protocol http2 --edge-bind-address 10.0.0.19 --edge-ip-version 4 run --token-file /home/ubuntu/.config/cloudflared/grasp-rat-open-panel.token
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,17 @@
-[
-  { "id": "A1", "group": "A", "localAddress": "198.51.100.11" },
-  { "id": "B1", "group": "B", "localAddress": "198.51.100.12" },
-  { "id": "A2", "group": "A", "localAddress": "198.51.100.13" },
-  { "id": "B2", "group": "B", "localAddress": "198.51.100.14" }
-]
+{
+  "dailyBenchmark": true,
+  "selection": {
+    "mode": "daily-fastest",
+    "activePerGroup": 2,
+    "activeCount": 4,
+    "retryMs": 300000
+  },
+  "egresses": [
+    { "id": "egress-01", "group": "A", "localAddress": "198.51.100.101" },
+    { "id": "egress-02", "group": "B", "localAddress": "198.51.100.102" },
+    { "id": "egress-03", "group": "A", "localAddress": "198.51.100.103" },
+    { "id": "egress-04", "group": "B", "localAddress": "198.51.100.104" },
+    { "id": "egress-05", "group": "A", "localAddress": "198.51.100.105" },
+    { "id": "egress-06", "group": "B", "localAddress": "198.51.100.106" }
+  ]
+}

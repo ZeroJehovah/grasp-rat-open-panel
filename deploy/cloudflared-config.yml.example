@@ -4,6 +4,6 @@
 tunnel: REPLACE_WITH_TUNNEL_ID
 credentials-file: /home/ubuntu/.config/cloudflared/REPLACE_WITH_TUNNEL_ID.json
 ingress:
-  - hostname: panel.example.invalid
+  - hostname: grasp-rat-open-panel.aiof.top
     service: http://127.0.0.1:19317
   - service: http_status:404
