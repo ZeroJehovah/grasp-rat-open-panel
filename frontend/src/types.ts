@@ -44,6 +44,7 @@ export interface Player {
   drop: number | null;
   quota: QuotaView | null;
   income: number | null;
+  todayIncome?: number | null;
   kills: number;
   deaths: number;
   state: PlayerState | null;

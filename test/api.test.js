@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('assert');
+const path = require('path');
 const zlib = require('zlib');
 const { ProjectionEngine } = require('../domain/projector');
 const { buildServer } = require('../api/server');
@@ -53,6 +54,11 @@ function fixture() {
   const history = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22' });
   assert.strictEqual(history.statusCode, 200);
   assert.strictEqual(history.json().from, '2026-08-22');
+  const staticApp = await buildServer({ store, staticDirectory: path.resolve(__dirname, '../frontend'), requireStatic: true });
+  const staticAsset = await staticApp.inject({ method: 'GET', url: '/src/App.tsx' });
+  assert.strictEqual(staticAsset.statusCode, 200);
+  assert.match(staticAsset.body, /export default function App/);
+  await staticApp.close();
   const compressedApp = await buildServer({ store: {
     getMeta: async () => ({ earliestDate: '2026-08-22', latestDate: '2026-08-22' }),
     getHistory: async () => ({ from: '2026-08-22', to: '2026-08-22', timezone: 'Asia/Shanghai', closedThrough: null, players: Array.from({ length: 100 }, (_, index) => ({ userId: index, name: 'compression-fixture-' + 'x'.repeat(32) })), messages: [], kills: [], dailyQuota: [], stats: [] })

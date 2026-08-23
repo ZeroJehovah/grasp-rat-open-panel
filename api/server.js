@@ -143,7 +143,7 @@ async function buildServer(options = {}) {
   if (options.staticDirectory) {
     try {
       const fastifyStatic = require('@fastify/static');
-      await app.register(fastifyStatic, { root: path.resolve(options.staticDirectory), prefix: '/', wildcard: false });
+      await app.register(fastifyStatic, { root: path.resolve(options.staticDirectory), prefix: '/', wildcard: true });
       app.setNotFoundHandler((request, reply) => {
         if (request.method === 'GET' && !request.url.startsWith('/api/')) return reply.sendFile('index.html');
         return reply.code(404).send({ error: 'not_found' });

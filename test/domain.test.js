@@ -182,4 +182,22 @@ function observation(engine, value, time) {
   assert.strictEqual(engine.lastTouchedDrops[0].drop_id, 77);
 })();
 
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  engine.lastStableVersion = { server_day: '2026-08-23' };
+  for (let userId = 1; userId <= 150; userId += 1) {
+    const quotaValue = userId <= 50 ? 2_000 - userId : 0;
+    const drop = userId > 50 && userId <= 100 ? 2_000 - userId : 0;
+    const income = userId > 100 ? 2_000 - userId : 0;
+    engine.players.set(String(userId), { user_id: userId, current_name: `player-${String(userId).padStart(3, '0')}`, last_seen_at: '2026-08-23T00:00:00.000Z', current_entity_id: userId, online: true });
+    engine.currentStates.set(String(userId), { user_id: userId, server_day: '2026-08-23', online: true, death_drop_coins: drop, hp: 100, x: 0, y: 0, entity_id: userId, snapshot_id: 'scale', observed_at: '2026-08-23T00:00:00.000Z' });
+    engine.dailyQuota.set(`2026-08-23:${userId}`, { user_id: userId, local_date: '2026-08-23', initial_quota: quotaValue - income, closing_quota: quotaValue, income, finalized_at: null });
+  }
+  const history = engine.getHistory({ from: '2026-08-23', to: '2026-08-23' });
+  assert.strictEqual(history.players.length, 150);
+  assert.ok(history.players.some(player => player.userId === 1));
+  assert.ok(history.players.some(player => player.userId === 51));
+  assert.ok(history.players.some(player => player.userId === 101));
+})();
+
 console.log('domain tests passed');

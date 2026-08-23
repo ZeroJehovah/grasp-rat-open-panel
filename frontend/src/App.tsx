@@ -14,13 +14,15 @@ function localDate(date = new Date()): string {
 }
 
 function shiftDate(value: string, days: number): string {
-  const date = new Date(`${value}T00:00:00+08:00`);
+  // These are business-calendar dates, not instants. Use a UTC calendar
+  // representation so Asia/Shanghai's UTC offset cannot shift the day.
+  const date = new Date(`${value}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
 
 function rangeForPreset(preset: RangePreset, today: string): { from: string; to: string } {
-  const date = new Date(`${today}T00:00:00+08:00`);
+  const date = new Date(`${today}T00:00:00Z`);
   const day = (date.getUTCDay() + 6) % 7;
   if (preset === 'today') return { from: today, to: today };
   if (preset === 'yesterday') return { from: shiftDate(today, -1), to: shiftDate(today, -1) };
@@ -30,6 +32,12 @@ function rangeForPreset(preset: RangePreset, today: string): { from: string; to:
   if (preset === 'this-month') return { from: monthStart, to: today };
   if (preset === 'last-month') { const end = shiftDate(monthStart, -1); return { from: `${end.slice(0, 7)}-01`, to: end }; }
   return { from: today, to: today };
+}
+
+function presetAvailable(preset: RangePreset, today: string, availableDates: string[]): boolean {
+  if (preset === 'custom' || availableDates.length === 0) return false;
+  const range = rangeForPreset(preset, today);
+  return range.from >= availableDates[0] && range.to <= availableDates[availableDates.length - 1];
 }
 
 function formatTime(value?: string | null): string {
@@ -134,8 +142,8 @@ function RangeControls({ meta }: { meta: MetaResponse | null }) {
   const setPreset = (preset: RangePreset) => {
     const next = rangeForPreset(preset, today);
     const available = meta?.availableDates || [];
-    const clamp = (value: string) => available.length ? (available.includes(value) ? value : (value < available[0] ? available[0] : available[available.length - 1])) : value;
-    rangeStore.set({ preset, from: clamp(next.from), to: clamp(next.to) });
+    if (!presetAvailable(preset, today, available)) return;
+    rangeStore.set({ preset, from: next.from, to: next.to });
   };
   const updateDate = (field: 'from' | 'to', value: string) => {
     const next = { ...range, preset: 'custom' as const, [field]: value };
@@ -145,7 +153,10 @@ function RangeControls({ meta }: { meta: MetaResponse | null }) {
   return <section className="range-control panel-block">
     <div className="section-heading"><div><p className="eyebrow">TIME WINDOW</p><h2>时间范围</h2></div><CalendarDays size={17} /></div>
     <div className="preset-grid">
-      {([['today', '今日'], ['yesterday', '昨日'], ['this-week', '本周'], ['last-week', '上周'], ['this-month', '本月'], ['last-month', '上月'], ['custom', '指定日期']] as [RangePreset, string][]).map(([value, label]) => <button key={value} className={range.preset === value ? 'preset active' : 'preset'} onClick={() => setPreset(value)}>{label}</button>)}
+      {([['today', '今日'], ['yesterday', '昨日'], ['this-week', '本周'], ['last-week', '上周'], ['this-month', '本月'], ['last-month', '上月'], ['custom', '指定日期']] as [RangePreset, string][]).map(([value, label]) => {
+        const available = value === 'custom' || presetAvailable(value, today, meta?.availableDates || []);
+        return <button key={value} className={range.preset === value ? 'preset active' : 'preset'} onClick={() => setPreset(value)} disabled={!available} title={available ? undefined : '当前没有覆盖该范围的历史数据'}>{label}</button>;
+      })}
     </div>
     <div className="date-fields"><label>起始日<input type="date" min={meta?.earliestDate || undefined} max={meta?.latestDate || undefined} value={range.from} onChange={event => updateDate('from', event.target.value)} /></label><span>→</span><label>结束日<input type="date" min={meta?.earliestDate || undefined} max={meta?.latestDate || undefined} value={range.to} onChange={event => updateDate('to', event.target.value)} /></label></div>
     <p className="micro-note">可用数据：{meta?.earliestDate || '--'} 至 {meta?.latestDate || '--'} · {meta?.timezone || 'Asia/Shanghai'}</p>
@@ -245,7 +256,7 @@ function playerCandidates(players: Player[]): Player[] {
   }).slice(0, 50);
   for (const player of top(player => player.quota?.value)) selected.add(player.userId);
   for (const player of top(player => player.drop)) selected.add(player.userId);
-  for (const player of top(player => player.quota?.income)) selected.add(player.userId);
+  for (const player of top(player => player.todayIncome ?? player.quota?.income)) selected.add(player.userId);
   return players.filter(player => selected.has(player.userId));
 }
 
@@ -277,9 +288,8 @@ function KillTable({ kills, map }: { kills: Kill[]; map: MapMetadata }) {
   return <section className="kill-panel"><div className="filter-bar"><label>Drop ≥ <input type="number" min="1" step="1" value={threshold} onChange={event => updateThreshold(event.target.value)} /></label><details><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{names.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(Number(id))} onChange={event => setSelected(current => event.target.checked ? [...current, Number(id)] : current.filter(value => value !== Number(id)))} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={() => setSelected([])}><X size={13} />清除</button>}</div><div className="table-shell"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>位置</th><th>掉落</th></tr></thead><tbody>{filtered.length === 0 ? <tr><td colSpan={6}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill, map); return <tr key={kill.kill_id || kill.killId || index}><td>{formatTime(kill.event_at || kill.eventAt)}</td><td>{kill.killer_name || '未知'}</td><td>{kill.victim_name || '未知'}</td><td><span className={`confidence ${kill.confidence}`}>{type}</span></td><td className={position.color}>{position.text}</td><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></section>;
 }
 
-function MainPanel({ realtime, history, meta, range, loading }: { realtime: RealtimeResponse | null; history: HistoryResponse | null; meta: MetaResponse; range: { from: string; to: string }; loading: boolean }) {
+function MainPanel({ realtime, history, meta, range, loading }: { realtime: RealtimeResponse | null; history: HistoryResponse | null; meta: MetaResponse; range: { from: string; to: string; preset?: RangePreset }; loading: boolean }) {
   const [tab, setTab] = useState<'map' | 'players' | 'kills'>('map');
-  const latest = realtime?.latest?.server_day || meta.latestDate || localDate();
   const realtimePlayers = realtime?.players || [];
   const historyPlayers = history?.players || [];
   const playerMap = new Map<number, Player>();
@@ -288,8 +298,8 @@ function MainPanel({ realtime, history, meta, range, loading }: { realtime: Real
   const players = playerCandidates([...playerMap.values()]);
   const messages = mergeById<Message>(history?.messages || [], realtime?.messages || [], 'message_id').filter(message => eventInRange(message, range));
   const kills = mergeById<Kill>(history?.kills || [], realtime?.kills || [], 'kill_id').filter(kill => eventInRange(kill, range));
-  const rangeLabel = range.from === range.to ? (range.to === latest ? '今日' : range.to) : `${range.from}—${range.to}`;
-  return <main className="main-grid"><aside className="left-rail"><RangeControls meta={meta} /><ChatPanel messages={messages} /></aside><section className="right-field"><nav className="tabs" aria-label="面板视图"><button className={tab === 'map' ? 'tab active' : 'tab'} onClick={() => setTab('map')}><MapIcon size={15} />实时地图</button><button className={tab === 'players' ? 'tab active' : 'tab'} onClick={() => setTab('players')}><Users size={15} />玩家列表</button><button className={tab === 'kills' ? 'tab active' : 'tab'} onClick={() => setTab('kills')}><Swords size={15} />击杀明细</button><span className="tab-status">{loading ? <><RefreshCw size={13} className="spin" />同步历史</> : <><span className="status-dot" />{realtime ? `v${realtime.latest?.server_tick ?? '--'}` : '等待快照'}</>}</span></nav>{tab === 'map' && <MapView players={realtimePlayers.length ? realtimePlayers : players.filter(player => player.online)} map={realtime?.map || meta.map} />}{tab === 'players' && <section className="players-panel panel-block"><div className="section-heading"><div><p className="eyebrow">RANKED CURRENT STATE</p><h2>玩家列表</h2></div><span className="result-count">{players.length} 位玩家</span></div><PlayersTable players={players} map={meta.map} rangeLabel={rangeLabel} /></section>}{tab === 'kills' && <KillTable kills={kills} map={meta.map} />}</section></main>;
+  const rangeLabel = ({ today: '今日', yesterday: '昨日', 'this-week': '本周', 'last-week': '上周', 'this-month': '本月', 'last-month': '上月', custom: '指定日期' } as Record<RangePreset, string>)[range.preset || 'custom'] || `${range.from}—${range.to}`;
+  return <main className="main-grid"><aside className="left-rail"><RangeControls meta={meta} /><ChatPanel messages={messages} /></aside><section className="right-field"><nav className="tabs" aria-label="面板视图"><button className={tab === 'map' ? 'tab active' : 'tab'} onClick={() => setTab('map')}><MapIcon size={15} />实时地图</button><button className={tab === 'players' ? 'tab active' : 'tab'} onClick={() => setTab('players')}><Users size={15} />玩家列表</button><button className={tab === 'kills' ? 'tab active' : 'tab'} onClick={() => setTab('kills')}><Swords size={15} />击杀明细</button><span className="tab-status">{loading ? <><RefreshCw size={13} className="spin" />同步历史</> : <><span className="status-dot" />{realtime ? `v${realtime.latest?.server_tick ?? '--'}` : '等待快照'}</>}</span></nav>{tab === 'map' && <MapView players={realtime ? realtimePlayers : []} map={realtime?.map || meta.map} />}{tab === 'players' && <section className="players-panel panel-block"><div className="section-heading"><div><p className="eyebrow">RANKED CURRENT STATE</p><h2>玩家列表</h2></div><span className="result-count">{players.length} 位玩家</span></div><PlayersTable players={players} map={meta.map} rangeLabel={rangeLabel} /></section>}{tab === 'kills' && <KillTable kills={kills} map={meta.map} />}</section></main>;
 }
 
 function Footer() {

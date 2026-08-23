@@ -78,6 +78,8 @@ h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
 .preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .preset { border: 1px solid var(--line); padding: 8px 5px; color: var(--muted); background: transparent; font-size: 11px; }
 .preset:hover { color: var(--ink); border-color: var(--line-strong); }
+.preset:disabled { cursor: not-allowed; opacity: .42; }
+.preset:disabled:hover { color: var(--muted); border-color: var(--line); }
 .preset.active { color: var(--paper-strong); border-color: var(--ink); background: var(--ink); }
 .date-fields { display: flex; align-items: end; gap: 8px; margin-top: 14px; color: var(--muted); font-size: 10px; }
 .date-fields label { flex: 1; }
@@ -143,8 +145,8 @@ tbody tr:last-child td { border-bottom: 0; } tbody tr:hover { background: color-
 
 @media (max-width: 900px) {
   .app-shell { padding: 18px 18px 14px; }
-  .main-grid { order: 2; }
-  .main-grid { grid-template-columns: 1fr; }
+  .main-grid { order: 2; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+  .main-grid > * { min-width: 0; }
   .left-rail { display: contents; }
   .right-field { display: contents; }
   .tabs { order: 3; margin: 0; }.map-panel, .players-panel, .kill-panel { order: 4; }.range-control { order: 2; }.chat { order: 5; }.footer { order: 6; }

@@ -68,6 +68,9 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
   const quotaValue = row.quota_value === null || row.quota_value === undefined ? null : Number(row.quota_value);
   const initialQuota = row.initial_quota === null || row.initial_quota === undefined ? null : Number(row.initial_quota);
   const currentDrop = state.death_drop_coins === undefined ? null : numberOrNull(state.death_drop_coins);
+  const todayIncome = row.today_income === undefined
+    ? (row.income === null || row.income === undefined ? null : Number(row.income))
+    : numberOrNull(row.today_income);
   return {
     userId: Number(row.user_id),
     name: row.current_name || '',
@@ -82,6 +85,7 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
       income: initialQuota !== null && quotaValue !== null ? quotaValue - initialQuota : null
     } : null,
     income: row.income === null || row.income === undefined ? null : Number(row.income),
+    todayIncome,
     kills: Number(stats.kills || 0),
     deaths: Number(stats.deaths || 0),
     state: row.state ? {
@@ -321,26 +325,65 @@ class PostgresPanelStore {
   }
 
   async getHistory(range) {
+    const latest = await this.getLatestVersion();
+    const currentDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
     const [messages, kills, stats, quota, players] = await Promise.all([
       this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]),
       this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]),
       this.query('SELECT local_date::text, user_id, SUM(kills)::int AS kills, SUM(deaths)::int AS deaths FROM player_daily_stats WHERE local_date BETWEEN $1::date AND $2::date GROUP BY local_date, user_id ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.stats + 1]),
       this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at FROM player_daily_quota WHERE local_date BETWEEN $1::date AND $2::date ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.dailyQuota + 1]),
-      this.query(`SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
-          c.server_day::text, c.snapshot_id, c.observed_at, c.state,
-          q.quota_day::text, q.initial_quota, q.quota_value,
-          d.income
-        FROM players p
-        LEFT JOIN player_state_current c ON c.user_id = p.user_id
-        LEFT JOIN player_quota_current q ON q.user_id = p.user_id
-        LEFT JOIN (
+      this.query(`WITH ranged_income AS (
           SELECT user_id, SUM(income) AS income
           FROM player_daily_quota
           WHERE local_date BETWEEN $1::date AND $2::date
           GROUP BY user_id
-        ) d ON d.user_id = p.user_id
-        ORDER BY p.user_id
-        LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.players + 1])
+        ), today_income AS (
+          SELECT user_id, SUM(income) AS today_income
+          FROM player_daily_quota
+          WHERE local_date = $3::date
+          GROUP BY user_id
+        ), player_rows AS (
+          SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
+            c.server_day::text, c.snapshot_id, c.observed_at, c.state,
+            q.quota_day::text, q.initial_quota, q.quota_value,
+            ri.income,
+            ti.today_income,
+            CASE WHEN c.server_day = $3::date
+              THEN NULLIF(c.state->>'death_drop_coins', '')::numeric
+              ELSE NULL
+            END AS current_drop
+          FROM players p
+          LEFT JOIN player_state_current c ON c.user_id = p.user_id
+          LEFT JOIN player_quota_current q ON q.user_id = p.user_id
+          LEFT JOIN ranged_income ri ON ri.user_id = p.user_id
+          LEFT JOIN today_income ti ON ti.user_id = p.user_id
+        ), quota_top AS (
+          SELECT user_id FROM player_rows
+          WHERE quota_value IS NOT NULL
+          ORDER BY quota_value DESC, user_id
+          LIMIT 50
+        ), drop_top AS (
+          SELECT user_id FROM player_rows
+          WHERE current_drop IS NOT NULL
+          ORDER BY current_drop DESC, user_id
+          LIMIT 50
+        ), today_income_top AS (
+          SELECT user_id FROM player_rows
+          WHERE today_income IS NOT NULL
+          ORDER BY today_income DESC, user_id
+          LIMIT 50
+        ), candidates AS (
+          SELECT user_id FROM quota_top
+          UNION
+          SELECT user_id FROM drop_top
+          UNION
+          SELECT user_id FROM today_income_top
+        )
+        SELECT pr.*
+        FROM player_rows pr
+        INNER JOIN candidates candidate ON candidate.user_id = pr.user_id
+        ORDER BY pr.user_id
+        LIMIT $4`, [range.from, range.to, currentDay, HISTORY_ROW_LIMITS.players + 1])
     ]);
     const messageRows = limitedRows(messages, 'messages', HISTORY_ROW_LIMITS.messages);
     const killRows = limitedRows(kills, 'kills', HISTORY_ROW_LIMITS.kills);
@@ -355,7 +398,6 @@ class PostgresPanelStore {
       current.deaths += Number(row.deaths || 0);
       statMap.set(key, current);
     }
-    const latest = await this.getLatestVersion();
     return {
       from: range.from,
       to: range.to,

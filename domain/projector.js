@@ -61,7 +61,7 @@ function sortByNumberDesc(values, value) {
 }
 
 function sortNames(values) {
-  return values.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-u-co-pinyin') || String(a.user_id).localeCompare(String(b.user_id)));
+  return values.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-u-co-pinyin') || Number(a.userId ?? a.user_id) - Number(b.userId ?? b.user_id));
 }
 
 function historyQuotaView(row) {
@@ -659,6 +659,7 @@ class ProjectionEngine {
     const stats = this.aggregateStats(uid, range);
     const income = this.aggregateIncome(uid, range);
     const todayQuota = this.dailyQuota.get(mapKey(today, uid));
+    const todayIncome = todayQuota && today ? this.aggregateIncome(uid, { from: today, to: today }) : null;
     const effectiveDrop = today && state?.server_day === today ? numeric(state.death_drop_coins) : null;
     return {
       userId: player.user_id,
@@ -674,6 +675,7 @@ class ProjectionEngine {
         income: todayQuota.income
       } : null,
       income,
+      todayIncome,
       kills: stats.kills,
       deaths: stats.deaths,
       state: state ? {
@@ -757,7 +759,7 @@ class ProjectionEngine {
   getHistory(range) {
     const messages = Array.from(this.messages.values()).filter(message => message.local_date >= range.from && message.local_date <= range.to).sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.server_day).localeCompare(String(b.server_day)) || String(a.message_id).localeCompare(String(b.message_id)));
     const kills = Array.from(this.kills.values()).filter(kill => kill.local_date >= range.from && kill.local_date <= range.to).sort((a, b) => String(a.event_at).localeCompare(String(b.event_at)) || String(a.local_date).localeCompare(String(b.local_date)) || String(a.kill_id).localeCompare(String(b.kill_id)));
-    const players = sortNames(Array.from(this.players.keys()).map(uid => this.currentPlayerView(uid, range, this.lastStableVersion?.server_day)).filter(Boolean));
+    const players = sortNames(this.selectHistoryUsers(range, this.lastStableVersion?.server_day));
     const dailyQuota = Array.from(this.dailyQuota.values()).filter(item => item.local_date >= range.from && item.local_date <= range.to).sort((a, b) => String(a.local_date).localeCompare(String(b.local_date)) || Number(a.user_id) - Number(b.user_id)).map(historyQuotaView);
     const stats = Array.from(this.dailyStats.values()).filter(item => item.local_date >= range.from && item.local_date <= range.to).sort((a, b) => String(a.local_date).localeCompare(String(b.local_date)) || Number(a.user_id) - Number(b.user_id)).map(historyStatView);
     const latest = this.lastStableVersion?.server_day || null;
@@ -773,6 +775,21 @@ class ProjectionEngine {
       dailyQuota: cloneJson(dailyQuota),
       stats: cloneJson(stats)
     };
+  }
+
+  selectHistoryUsers(range, today = this.lastStableVersion?.server_day) {
+    const views = Array.from(this.players.keys())
+      .map(uid => this.currentPlayerView(uid, range, today))
+      .filter(Boolean);
+    const selected = new Set();
+    const top = value => views
+      .filter(player => value(player) !== null && value(player) !== undefined && Number.isFinite(Number(value(player))))
+      .sort((a, b) => Number(value(b)) - Number(value(a)) || String(a.name).localeCompare(String(b.name)) || a.userId - b.userId)
+      .slice(0, 50);
+    for (const player of top(player => player.quota?.value)) selected.add(player.userId);
+    for (const player of top(player => player.drop)) selected.add(player.userId);
+    for (const player of top(player => player.todayIncome)) selected.add(player.userId);
+    return views.filter(player => selected.has(player.userId));
   }
 
   rebuildCurrentAt(snapshotId = null) {

@@ -6,9 +6,9 @@ const meta = {
 };
 const player = { userId: 7, name: 'fixture-player', online: true, lastSeenAt: '2026-08-22T00:01:00+08:00', currentEntityId: 1, drop: 12, quota: { day: '2026-08-22', initial: 200, value: 204, income: 4 }, income: 4, kills: 1, deaths: 0, state: { hp: 100, maxHp: 100, x: 20, y: 10, stamina5s: 10000, stamina1h: 3000000, stamina1d: 20000000, stamina5sLimit: 10000, stamina1hLimit: 3000000, stamina1dLimit: 20000000, currentJoinMode: 'Passive', life: 'Alive', snapshotId: 'test', observedAt: '2026-08-22T00:01:00+08:00' } };
 
-async function mockApi(page: Page) {
+async function mockApi(page: Page, realtimePlayers = [player]) {
   await page.route('**/api/v1/meta', route => route.fulfill({ json: meta }));
-  await page.route('**/api/v1/realtime*', route => route.fulfill({ json: { versionToken: 'v1', generatedAt: player.state.observedAt, latest: { snapshot_id: 's1', server_day: '2026-08-22', server_tick: 10, observed_at: player.state.observedAt }, map: meta.map, players: [player], messages: [], kills: [] } }));
+  await page.route('**/api/v1/realtime*', route => route.fulfill({ json: { versionToken: 'v1', generatedAt: player.state.observedAt, latest: { snapshot_id: 's1', server_day: '2026-08-22', server_tick: 10, observed_at: player.state.observedAt }, map: meta.map, players: realtimePlayers, messages: [], kills: [] } }));
   await page.route('**/api/v1/realtime/version', route => route.fulfill({ json: { versionToken: 'v1', snapshotId: 's1', observedAt: player.state.observedAt } }));
   await page.route('**/api/v1/history*', route => route.fulfill({ json: { from: '2026-08-22', to: '2026-08-22', timezone: 'Asia/Shanghai', generatedAt: player.state.observedAt, closedThrough: null, players: [player], messages: [], kills: [], dailyQuota: [], stats: [] } }));
 }
@@ -34,12 +34,30 @@ test('narrow panel keeps range, tabs and footer reachable', async ({ page }, tes
   await mockApi(page);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: '时间范围' })).toBeVisible();
+  await page.getByRole('button', { name: '玩家列表' }).click();
+  await expect(page.getByText('fixture-player')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
   await page.getByRole('button', { name: '击杀明细' }).click();
   await expect(page.getByText('没有符合阈值的击杀记录')).toBeVisible();
   await expect(page.getByRole('link', { name: 'GitHub' })).toBeVisible();
   const topLevelOrder = await page.locator('.app-shell > *').evaluateAll(elements => elements.map(element => element.className));
   expect(topLevelOrder.slice(0, 3)).toEqual(['banner', 'global-status', 'main-grid']);
   await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
+});
+
+test('unavailable range presets are disabled instead of silently changing the date', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: '今日' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '昨日' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '上周' })).toBeDisabled();
+  await expect(page.locator('input[type="date"]').first()).toHaveValue('2026-08-22');
+});
+
+test('an empty realtime candidate list does not fall back to historical players on the map', async ({ page }) => {
+  await mockApi(page, []);
+  await page.goto('/');
+  await expect(page.getByText('0 位玩家')).toBeVisible();
 });
 
 test('historical range excludes realtime events from a later day', async ({ page }) => {
@@ -61,6 +79,9 @@ test('historical range excludes realtime events from a later day', async ({ page
   await page.getByRole('button', { name: '昨日' }).click();
   await expect(page.getByText('old-chat')).toBeVisible();
   await expect(page.getByText('today-chat')).not.toBeVisible();
+  await page.getByRole('button', { name: '击杀明细' }).click();
+  await page.getByRole('button', { name: '玩家列表' }).click();
+  await expect(page.locator('.player-table th').filter({ hasText: '昨日击杀数' })).toBeVisible();
   await page.getByRole('button', { name: '击杀明细' }).click();
   await expect(page.getByRole('cell', { name: 'old-killer' })).toBeVisible();
   await expect(page.getByRole('cell', { name: 'today-killer' })).not.toBeVisible();
