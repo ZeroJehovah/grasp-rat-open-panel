@@ -344,7 +344,7 @@ async function runRound(options, dependencies, scheduler, queue) {
     lastAttempt = await runAttempt(options, dependencies, scheduler, egress, queue, extraRetries);
     if (lastAttempt.ok) return { ...lastAttempt, extraRetries };
   }
-  return { ...(lastAttempt || { ok: false, metadata: null }), extraRetries, collectorGap: Boolean(lastAttempt) };
+  return { ...(lastAttempt || { ok: false, metadata: null }), extraRetries, collectorGap: true };
 }
 
 async function processQueue(queue, dependencies) {

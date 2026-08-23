@@ -126,6 +126,18 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
 (async () => {
   const outputDir = tempDir();
   const scheduler = new EgressScheduler({ statePath: path.join(outputDir, 'state.json'), egresses });
+  for (const egress of egresses) scheduler.stateFor(egress).cooldown_until = 10_000;
+  const result = await runRound({ outputDir, extraRetryMax: 0 }, {
+    now: () => 0,
+    requestSnapshot: async () => { throw new Error('no egress should be selected'); }
+  }, scheduler, null);
+  assert.strictEqual(result.collectorGap, true);
+  console.log('unavailable egress gap test passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+(async () => {
+  const outputDir = tempDir();
+  const scheduler = new EgressScheduler({ statePath: path.join(outputDir, 'state.json'), egresses });
   const calls = [];
   const payload = Buffer.from(JSON.stringify({ type: 'snapshot', tick: 1, total_entities: 0, entities: [], bullets: [], coin_drops: [], messages: [] }));
   const result = await runRound({ outputDir, extraRetryMax: 1, retryJitterMs: 0 }, {
