@@ -5,7 +5,7 @@ const path = require('path');
 const Fastify = require('fastify');
 
 const { ProjectionEngine } = require('../domain/projector');
-const { PostgresPanelStore } = require('../storage/postgres-store');
+const { HISTORY_ROW_LIMITS, PostgresPanelStore } = require('../storage/postgres-store');
 const { collectorHealth } = require('../collector/health');
 const { BUSINESS_TIMEZONE, SCHEMA_VERSION, businessDateRange } = require('../domain/snapshot');
 
@@ -41,6 +41,17 @@ function setCommonHeaders(reply) {
 function parseVersion(query) {
   if (!query || query.version === undefined || query.version === '') return null;
   return String(query.version);
+}
+
+function historyLimitReply(reply, resource, limit) {
+  return reply.code(413).header('Cache-Control', 'no-store').send({
+    error: 'history_result_limit',
+    resource,
+    limit,
+    generatedAt: new Date().toISOString(),
+    timezone: BUSINESS_TIMEZONE,
+    schemaVersion: SCHEMA_VERSION
+  });
 }
 
 function buildStore(options = {}) {
@@ -101,7 +112,19 @@ async function buildServer(options = {}) {
     if (meta.earliestDate && range.from < meta.earliestDate || meta.latestDate && range.to > meta.latestDate) {
       return reply.code(416).send({ error: 'date_range_unavailable', earliestDate: meta.earliestDate, latestDate: meta.latestDate, generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
     }
-    const payload = envelope(await store.getHistory(range), range);
+    let history;
+    try {
+      history = await store.getHistory(range);
+    } catch (error) {
+      if (error?.code === 'history_result_limit') {
+        return historyLimitReply(reply, error.resource, error.limit);
+      }
+      throw error;
+    }
+    for (const [resource, limit] of Object.entries(HISTORY_ROW_LIMITS)) {
+      if (Array.isArray(history[resource]) && history[resource].length > limit) return historyLimitReply(reply, resource, limit);
+    }
+    const payload = envelope(history, range);
     const isClosed = Boolean(payload.closedThrough && payload.closedThrough >= range.to);
     const cache = isClosed ? 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400' : 'public, max-age=5, s-maxage=10, stale-while-revalidate=30';
     reply.header('Cache-Control', cache);

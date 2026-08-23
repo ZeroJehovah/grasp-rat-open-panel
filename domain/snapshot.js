@@ -6,6 +6,7 @@ const BUSINESS_TIMEZONE = 'Asia/Shanghai';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TICK_MS = 50;
 const DEFAULT_MIN_STEADY_ENTITIES = 900;
+const MAX_HISTORY_DAYS = 62;
 const SCHEMA_VERSION = 'snapshot-v1';
 
 const NUMERIC_ENTITY_FIELDS = [
@@ -307,8 +308,19 @@ function diffState(previous, current) {
 }
 
 function businessDateRange(from, to) {
-  const valid = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') && Number.isFinite(dateToUtcStart(value));
-  if (!valid(from) || !valid(to) || from > to) throw new Error('date range must be YYYY-MM-DD with from <= to');
+  const parseDate = value => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return NaN;
+    const timestamp = dateToUtcStart(value);
+    const [year, month, day] = value.split('-').map(Number);
+    const calendarDate = new Date(Date.UTC(year, month - 1, day));
+    if (!Number.isFinite(timestamp) || calendarDate.getUTCFullYear() !== year || calendarDate.getUTCMonth() + 1 !== month || calendarDate.getUTCDate() !== day) return NaN;
+    return timestamp;
+  };
+  const fromTimestamp = parseDate(from);
+  const toTimestamp = parseDate(to);
+  if (!Number.isFinite(fromTimestamp) || !Number.isFinite(toTimestamp) || from > to) throw new Error('date range must be YYYY-MM-DD with from <= to');
+  const days = Math.floor((toTimestamp - fromTimestamp) / DAY_MS) + 1;
+  if (days > MAX_HISTORY_DAYS) throw new Error(`date range cannot exceed ${MAX_HISTORY_DAYS} days`);
   return { from, to };
 }
 
@@ -323,6 +335,7 @@ module.exports = {
   DAY_MS,
   TICK_MS,
   DEFAULT_MIN_STEADY_ENTITIES,
+  MAX_HISTORY_DAYS,
   SCHEMA_VERSION,
   ENTITY_FIELDS,
   STATE_FIELDS,

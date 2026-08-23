@@ -127,6 +127,8 @@ async function runDatabaseRetention(options) {
   await client.connect();
   try {
     await client.query('BEGIN');
+    const anchor = businessDate(options.now.getTime());
+    await client.query('SELECT ensure_panel_date_partitions($1::date)', [anchor]);
     const open = await client.query('SELECT count(*)::int AS count FROM player_daily_quota WHERE local_date < $1::date AND finalized_at IS NULL', [boundary]);
     if (Number(open.rows[0]?.count || 0) > 0) {
       await client.query('ROLLBACK');
@@ -154,9 +156,11 @@ async function runDatabaseRetention(options) {
     ];
     const rows = {};
     for (const [name, sql, values = [boundary]] of statements) rows[name] = Number((await client.query(sql, values)).rowCount || 0);
-    await client.query('INSERT INTO retention_audit (action, boundary_date, rows_affected, detail) VALUES ($1, $2::date, $3, $4::jsonb)', ['structured_retention', boundary, Object.values(rows).reduce((sum, value) => sum + value, 0), JSON.stringify(rows)]);
+    const partitionResult = await client.query('SELECT prune_panel_date_partitions($1::date) AS dropped', [boundary]);
+    const detail = { rows, droppedPartitions: partitionResult.rows[0]?.dropped || {} };
+    await client.query('INSERT INTO retention_audit (action, boundary_date, rows_affected, detail) VALUES ($1, $2::date, $3, $4::jsonb)', ['structured_retention', boundary, Object.values(rows).reduce((sum, value) => sum + value, 0), JSON.stringify(detail)]);
     await client.query('COMMIT');
-    return { skipped: false, boundaryDate: boundary, rows };
+    return { skipped: false, boundaryDate: boundary, rows, droppedPartitions: detail.droppedPartitions };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

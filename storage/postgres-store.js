@@ -4,6 +4,14 @@ const { Pool } = require('pg');
 const { ProjectionEngine, loadMapMetadata } = require('../domain/projector');
 const { BUSINESS_TIMEZONE, SCHEMA_VERSION, cloneJson } = require('../domain/snapshot');
 
+const HISTORY_ROW_LIMITS = Object.freeze({
+  players: 5_000,
+  messages: 10_000,
+  kills: 10_000,
+  dailyQuota: 100_000,
+  stats: 100_000
+});
+
 function mapKey(...parts) {
   return parts.map(part => String(part ?? '')).join(':');
 }
@@ -11,6 +19,45 @@ function mapKey(...parts) {
 function toDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function historyQuotaRow(row) {
+  return {
+    local_date: String(row.local_date).slice(0, 10),
+    user_id: Number(row.user_id),
+    initial_quota: numberOrNull(row.initial_quota),
+    closing_quota: numberOrNull(row.closing_quota),
+    income: numberOrNull(row.income),
+    finalized_at: row.finalized_at ? toDate(row.finalized_at) : null
+  };
+}
+
+function historyStatRow(row) {
+  return {
+    local_date: String(row.local_date).slice(0, 10),
+    user_id: Number(row.user_id),
+    kills: Number(row.kills || 0),
+    deaths: Number(row.deaths || 0)
+  };
+}
+
+function historyLimitError(resource, limit) {
+  const error = new Error(`history ${resource} result exceeds ${limit} rows`);
+  error.code = 'history_result_limit';
+  error.resource = resource;
+  error.limit = limit;
+  return error;
+}
+
+function limitedRows(result, resource, limit) {
+  if (result.rows.length > limit) throw historyLimitError(resource, limit);
+  return result.rows;
 }
 
 function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
@@ -249,24 +296,33 @@ class PostgresPanelStore {
 
   async getHistory(range) {
     const [messages, kills, stats, quota, players] = await Promise.all([
-      this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at', [range.from, range.to]),
-      this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at', [range.from, range.to]),
-      this.query('SELECT local_date::text, user_id, SUM(kills)::int AS kills, SUM(deaths)::int AS deaths FROM player_daily_stats WHERE local_date BETWEEN $1::date AND $2::date GROUP BY local_date, user_id', [range.from, range.to]),
-      this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id FROM player_daily_quota WHERE local_date BETWEEN $1::date AND $2::date', [range.from, range.to]),
+      this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]),
+      this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]),
+      this.query('SELECT local_date::text, user_id, SUM(kills)::int AS kills, SUM(deaths)::int AS deaths FROM player_daily_stats WHERE local_date BETWEEN $1::date AND $2::date GROUP BY local_date, user_id ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.stats + 1]),
+      this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at FROM player_daily_quota WHERE local_date BETWEEN $1::date AND $2::date ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.dailyQuota + 1]),
       this.query(`SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
           c.server_day::text, c.snapshot_id, c.observed_at, c.state,
           q.quota_day::text, q.initial_quota, q.quota_value,
-          SUM(CASE WHEN d.local_date BETWEEN $1::date AND $2::date THEN d.income ELSE 0 END) AS income
+          d.income
         FROM players p
         LEFT JOIN player_state_current c ON c.user_id = p.user_id
         LEFT JOIN player_quota_current q ON q.user_id = p.user_id
-        LEFT JOIN player_daily_quota d ON d.user_id = p.user_id
-        GROUP BY p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
-          c.server_day, c.snapshot_id, c.observed_at, c.state,
-          q.quota_day, q.initial_quota, q.quota_value`, [range.from, range.to])
+        LEFT JOIN (
+          SELECT user_id, SUM(income) AS income
+          FROM player_daily_quota
+          WHERE local_date BETWEEN $1::date AND $2::date
+          GROUP BY user_id
+        ) d ON d.user_id = p.user_id
+        ORDER BY p.user_id
+        LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.players + 1])
     ]);
+    const messageRows = limitedRows(messages, 'messages', HISTORY_ROW_LIMITS.messages);
+    const killRows = limitedRows(kills, 'kills', HISTORY_ROW_LIMITS.kills);
+    const statRows = limitedRows(stats, 'stats', HISTORY_ROW_LIMITS.stats);
+    const quotaRows = limitedRows(quota, 'dailyQuota', HISTORY_ROW_LIMITS.dailyQuota);
+    const playerRows = limitedRows(players, 'players', HISTORY_ROW_LIMITS.players);
     const statMap = new Map();
-    for (const row of stats.rows) {
+    for (const row of statRows) {
       const key = String(row.user_id);
       const current = statMap.get(key) || { kills: 0, deaths: 0 };
       current.kills += Number(row.kills || 0);
@@ -280,11 +336,11 @@ class PostgresPanelStore {
       timezone: BUSINESS_TIMEZONE,
       generatedAt: new Date().toISOString(),
       closedThrough: latest && range.to < String(latest.server_day).slice(0, 10) ? range.to : null,
-      players: players.rows.map(row => rowToPlayer(row, statMap.get(String(row.user_id)), { currentDay: latest?.server_day })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin')),
-      messages: messages.rows,
-      kills: kills.rows,
-      dailyQuota: quota.rows,
-      stats: stats.rows
+      players: playerRows.map(row => rowToPlayer(row, statMap.get(String(row.user_id)), { currentDay: latest?.server_day })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin')),
+      messages: messageRows,
+      kills: killRows,
+      dailyQuota: quotaRows.map(historyQuotaRow),
+      stats: statRows.map(historyStatRow)
     };
   }
 
@@ -413,4 +469,4 @@ class PostgresPanelStore {
   }
 }
 
-module.exports = { PostgresPanelStore, rowToPlayer };
+module.exports = { HISTORY_ROW_LIMITS, PostgresPanelStore, rowToPlayer };

@@ -57,7 +57,12 @@ The panel API defaults to `127.0.0.1:19317`; this intentionally avoids the
 existing CPAMP management service on port `18317` on the deployment host.
 
 `/api/v1/realtime/version` is always `no-store`. Historical responses are
-range-limited and cacheable; realtime responses use a version token and ETag.
+range-limited to at most 62 calendar days, use stable ordering and bounded
+result sets, and are cacheable; an oversized result returns `413` instead of
+being silently truncated. Realtime responses use a version token and ETag.
+Migration `004_date_partitions.sql` keeps the date-keyed fact tables in a
+rolling daily-partition window while retaining a default partition as a safety
+net.
 The retention command removes raw bodies only after the PostgreSQL structured
 retention checkpoint and daily finalization succeed, and keeps observation
 metadata for at least 62 days.

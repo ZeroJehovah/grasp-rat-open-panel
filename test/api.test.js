@@ -35,9 +35,22 @@ function fixture() {
   assert.strictEqual(cached.statusCode, 304);
   const unchanged = await app.inject({ method: 'GET', url: `/api/v1/realtime?version=${encodeURIComponent(realtime.json().versionToken)}` });
   assert.strictEqual(unchanged.json().unchanged, true);
+  const invalidDate = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-02-30&to=2026-02-30' });
+  assert.strictEqual(invalidDate.statusCode, 400);
+  const tooLong = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-06-21&to=2026-08-22' });
+  assert.strictEqual(tooLong.statusCode, 400);
   const history = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22' });
   assert.strictEqual(history.statusCode, 200);
   assert.strictEqual(history.json().from, '2026-08-22');
   await app.close();
+
+  const oversizedApp = await buildServer({ store: {
+    getMeta: async () => ({ earliestDate: '2026-08-22', latestDate: '2026-08-22' }),
+    getHistory: async () => ({ from: '2026-08-22', to: '2026-08-22', timezone: 'Asia/Shanghai', closedThrough: null, players: Array.from({ length: 5_001 }, () => ({})), messages: [], kills: [], dailyQuota: [], stats: [] })
+  } });
+  const oversized = await oversizedApp.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22' });
+  assert.strictEqual(oversized.statusCode, 413);
+  assert.strictEqual(oversized.json().error, 'history_result_limit');
+  await oversizedApp.close();
   console.log('api tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
