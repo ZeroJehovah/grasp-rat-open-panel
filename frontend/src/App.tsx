@@ -38,7 +38,7 @@ function rowForUserDay(rows: unknown[], userId: number, day: string): Record<str
   const row = rows.find(value => {
     if (!value || typeof value !== 'object') return false;
     const candidate = value as Record<string, unknown>;
-    return Number(candidate.user_id) === userId && String(candidate.local_date || '').slice(0, 10) === day;
+    return Number(candidate.user_id) === userId && String(candidate.local_date || candidate.quota_day || '').slice(0, 10) === day;
   });
   return row && typeof row === 'object' ? row as Record<string, unknown> : null;
 }
