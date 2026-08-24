@@ -70,8 +70,11 @@ export function useRoute(todayRange?: { from: string; to: string } | null): Pane
   }, []);
 
   useEffect(() => {
-    if (route.scope !== 'history' || (route.from && route.to) || !todayRange) return;
-    const next = { ...route, from: todayRange.from, to: todayRange.to };
+    if (route.scope !== 'history' || !todayRange) return;
+    if (route.from && route.to && route.from <= todayRange.to && route.to <= todayRange.to) return;
+    const from = route.from && route.from <= todayRange.to ? route.from : todayRange.from;
+    const to = route.to && route.to <= todayRange.to ? route.to : todayRange.to;
+    const next = { ...route, from: from <= to ? from : todayRange.from, to: from <= to ? to : todayRange.to };
     if (!sameRoute(route, next)) navigate(next, true);
   }, [route, todayRange]);
 

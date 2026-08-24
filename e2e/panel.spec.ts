@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
 const meta = {
-  map: { id: 'test-map', version: 1, bounds: { minX: -100, maxX: 100, minY: -100, maxY: 100 }, center: { x: 0, y: 0 }, directions: ['北', '东北', '东', '东南', '南', '西南', '西', '西北'], metersPerGameUnit: 1 },
+  map: { id: 'test-map', version: 1, bounds: { minX: -1000, maxX: 1000, minY: -1000, maxY: 1000 }, center: { x: 0, y: 0 }, directions: ['北', '东北', '东', '东南', '南', '西南', '西', '西北'], metersPerGameUnit: 1 },
   availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { today: { from: '2026-08-23', to: '2026-08-23' }, yesterday: { from: '2026-08-22', to: '2026-08-22' }, 'this-week': null, 'last-week': null, 'this-month': null, 'last-month': null }, timezone: 'Asia/Shanghai', schemaVersion: 'snapshot-v1', features: { realtime: true, history: true }
 };
 const player = { userId: 7, name: 'fixture-player', online: true, lastSeenAt: '2026-08-23T00:01:00+08:00', currentEntityId: 1, drop: 12, quota: { day: '2026-08-23', initial: 200, value: 204, income: 4 }, income: 4, kills: 1, deaths: 0, state: { hp: 100, maxHp: 100, x: 20, y: 10, invulnerableRemainingSecs: 0, loss: 2, stamina5s: 10000, stamina1h: 3000000, stamina1d: 20000000, stamina5sLimit: 10000, stamina1hLimit: 3000000, stamina1dLimit: 20000000, currentJoinMode: 'Passive', life: 'Alive', snapshotId: 'test', observedAt: '2026-08-23T00:01:00+08:00' } };
@@ -47,11 +47,26 @@ test('history URL preserves range and browser back restores the previous tab', a
   await mockApi(page);
   await page.goto('/realtime/chat');
   await page.getByRole('link', { name: '历史' }).click();
-  await expect(page).toHaveURL(/\/history\/chat\?from=2026-08-23&to=2026-08-23$/);
+  await expect(page).toHaveURL(/\/history\/chat\?from=2026-08-22&to=2026-08-22$/);
   await page.getByRole('tab', { name: '玩家' }).click();
-  await expect(page).toHaveURL(/\/history\/players\?from=2026-08-23&to=2026-08-23$/);
+  await expect(page).toHaveURL(/\/history\/players\?from=2026-08-22&to=2026-08-22$/);
   await page.goBack();
-  await expect(page).toHaveURL(/\/history\/chat\?from=2026-08-23&to=2026-08-23$/);
+  await expect(page).toHaveURL(/\/history\/chat\?from=2026-08-22&to=2026-08-22$/);
+});
+
+test('history range offers only past presets and excludes today from custom dates', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/history/chat?from=2026-08-23&to=2026-08-23');
+  await expect(page).toHaveURL(/\/history\/chat\?from=2026-08-22&to=2026-08-22$/);
+  await expect(page.getByRole('button', { name: '昨天' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '上周' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '上月' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '指定日期' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '今天' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '昨日' })).toHaveCount(0);
+  await expect(page.locator('input[type="date"]')).toHaveCount(2);
+  await expect(page.locator('input[type="date"]').first()).toHaveAttribute('max', '2026-08-22');
+  await expect(page.locator('input[type="date"]').nth(1)).toHaveAttribute('max', '2026-08-22');
 });
 
 test('switching tabs requests only the selected resource', async ({ page }) => {
@@ -79,21 +94,43 @@ test('narrow layout has no document overflow and map does not fall back to histo
 test('map camera exposes axes, viewport readout and player details', async ({ page }) => {
   await mockApi(page);
   await page.goto('/realtime/map');
+  expect(await page.locator('.map-square').evaluate(element => { const rect = element.getBoundingClientRect(); return Math.abs(rect.width - rect.height); })).toBeLessThan(1);
   await expect(page.getByText('x=0')).toBeVisible();
   await expect(page.getByText('y=0')).toBeVisible();
   await expect(page.getByText(/视野半径/)).toBeVisible();
   await expect(page.getByRole('button', { name: /fixture-player 玩家详情/ })).toBeVisible();
+  await expect(page.getByText('Drop 12')).toBeVisible();
+  const initialRadius = await page.locator('.map-readout span').first().textContent();
   await page.getByRole('button', { name: /fixture-player 玩家详情/ }).hover();
   await expect(page.getByText(/Loss 2/)).toBeVisible();
+  await expect(page.getByText('坐标 x 20 / y 10', { exact: true })).toBeVisible();
+  await expect(page.getByText(/^无敌/)).toHaveCount(0);
   await page.getByRole('button', { name: '放大地图' }).click();
+  await expect(page.locator('.map-readout span').first()).not.toHaveText(initialRadius || '');
   await expect(page.getByRole('button', { name: '缩小地图' })).toBeVisible();
 });
 
-test('chat filter uses the explicit chat-only wording', async ({ page }) => {
+test('chat filter folds adjacent kills into a visible summary', async ({ page }) => {
   await mockApi(page);
-  await page.route('**/api/v1/realtime/chat*', route => route.fulfill({ json: response('realtime', 'chat', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, messages: [{ message_id: 'chat', kind: 'chat', text: 'hello', event_at: player.state.observedAt }, { message_id: 'kill', kind: 'kill', text: 'killer killed victim', event_at: '2026-08-23T00:02:00+08:00' }] }) }));
+  await page.route('**/api/v1/realtime/chat*', route => route.fulfill({ json: response('realtime', 'chat', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, messages: [{ message_id: 'chat', kind: 'chat', text: 'hello', event_at: player.state.observedAt }, { message_id: 'kill-1', kind: 'kill', text: 'killer killed victim one', event_at: '2026-08-23T00:02:00+08:00' }, { message_id: 'kill-2', kind: 'kill', text: 'killer killed victim two', event_at: '2026-08-23T00:03:00+08:00' }, { message_id: 'chat-2', kind: 'chat', text: 'after kills', event_at: '2026-08-23T00:04:00+08:00' }] }) }));
   await page.goto('/realtime/chat');
-  await expect(page.getByText('killer killed victim')).toBeVisible();
+  await expect(page.getByText('killer killed victim one')).toBeVisible();
+  await expect(page.getByText('killer killed victim two')).toBeVisible();
   await page.getByText('仅看聊天').click();
-  await expect(page.getByText('killer killed victim')).not.toBeVisible();
+  await expect(page.getByText('2条击杀记录已折叠')).toBeVisible();
+  await expect(page.getByText('killer killed victim one')).toHaveCount(0);
+  await expect(page.getByText('killer killed victim two')).toHaveCount(0);
+  await expect(page.getByText('hello')).toBeVisible();
+  await expect(page.getByText('after kills')).toBeVisible();
+});
+
+test('player rows keep stamina and position on one line and expose selection tooltip', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/players');
+  await expect(page.getByText('fixture-player')).toBeVisible();
+  expect(await page.locator('.stamina-grid').evaluate(element => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(3);
+  await expect(page.locator('.position-cell')).toHaveCSS('display', 'inline-flex');
+  const tooltip = page.locator('.tooltip');
+  await tooltip.hover();
+  await expect(tooltip).toHaveAttribute('data-tooltip', /额度 Top50、Drop Top50、收益 Top50/);
 });
