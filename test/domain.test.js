@@ -118,6 +118,28 @@ function observation(engine, value, time) {
 
 (() => {
   const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  const online = entity({ user_id: 7, name: 'online-today', death_drop_coins: 2, x: 10, y: 20 });
+  const offline = entity({ user_id: 8, entity_id: 12, name: 'offline-today', death_drop_coins: 15, x: 30, y: 40 });
+  observation(engine, body(100, { entities: [online, offline] }), '01:00:00');
+  observation(engine, body(200, { entities: [online] }), '01:01:00');
+  const realtime = engine.getRealtimePlayers();
+  const offlineView = realtime.players.find(player => player.userId === 8);
+  assert.strictEqual(offlineView.online, false);
+  assert.strictEqual(offlineView.drop, 15);
+  assert.strictEqual(offlineView.state.hp, 100);
+  assert.deepStrictEqual({ x: offlineView.state.x, y: offlineView.state.y }, { x: 30, y: 40 });
+
+  const nextDay = entity({ user_id: 7, name: 'online-next-day', daily_budget_day_key_utc8: 20688 });
+  observation(engine, body(10, { entities: [nextDay] }), '01:02:00');
+  const nextRealtime = engine.getRealtimePlayers();
+  const noLoginToday = nextRealtime.players.find(player => player.userId === 8);
+  assert.strictEqual(noLoginToday.online, false);
+  assert.strictEqual(noLoginToday.drop, null);
+  assert.strictEqual(noLoginToday.state, null);
+})();
+
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
   observation(engine, body(100, { entity: { death_drop_coins: 5, death_loss_preview: null } }), '00:20:00');
   observation(engine, body(200, { entity: { death_drop_coins: 4, death_loss_preview: null } }), '00:21:00');
   const quota = engine.quotaCurrent.get('7');

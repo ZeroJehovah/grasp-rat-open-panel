@@ -684,18 +684,32 @@ class ProjectionEngine {
     const stats = this.aggregateStats(uid, range);
     const income = this.aggregateIncome(uid, range);
     const todayQuota = this.dailyQuota.get(mapKey(today, uid));
-    const quota = range ? this.aggregateQuota(uid, range) : (todayQuota ? {
+    const currentQuota = this.quotaCurrent.get(uid);
+    const isTodayRange = Boolean(today && range?.from === today && range?.to === today);
+    const rangedQuota = range ? this.aggregateQuota(uid, range) : null;
+    const quota = range ? (rangedQuota || (isTodayRange && currentQuota ? {
+      day: currentQuota.quota_day,
+      initial: currentQuota.initial_quota,
+      value: currentQuota.quota_value,
+      income: currentQuota.initial_quota !== null && currentQuota.quota_value !== null ? currentQuota.quota_value - currentQuota.initial_quota : null
+    } : null)) : (todayQuota ? {
       day: todayQuota.local_date,
       initial: todayQuota.initial_quota,
       value: todayQuota.closing_quota,
       income: todayQuota.income
+    } : currentQuota ? {
+      day: currentQuota.quota_day,
+      initial: currentQuota.initial_quota,
+      value: currentQuota.quota_value,
+      income: currentQuota.initial_quota !== null && currentQuota.quota_value !== null ? currentQuota.quota_value - currentQuota.initial_quota : null
     } : null);
     const todayIncome = todayQuota && today && range?.from === today && range?.to === today ? this.aggregateIncome(uid, { from: today, to: today }) : null;
-    const effectiveDrop = today && state?.server_day === today ? numeric(state.death_drop_coins) : null;
+    const currentState = state && (!today || state.server_day === today) ? state : null;
+    const effectiveDrop = currentState ? numeric(currentState.death_drop_coins) : null;
     return {
       userId: player.user_id,
       name: player.current_name || '',
-      online: Boolean(state?.online && state.server_day === today),
+      online: Boolean(currentState?.online && currentState.server_day === today),
       lastSeenAt: player.last_seen_at || null,
       currentEntityId: player.current_entity_id ?? null,
       drop: effectiveDrop,
@@ -704,23 +718,23 @@ class ProjectionEngine {
       todayIncome,
       kills: stats.kills,
       deaths: stats.deaths,
-      state: state ? {
-        hp: state.hp,
-        maxHp: state.max_hp,
-        x: state.x,
-        y: state.y,
-        invulnerableRemainingSecs: numeric(state.invulnerable_remaining_secs),
-        loss: numeric(state.death_loss_preview),
-        stamina5s: state.stamina_5s_remaining_milli,
-        stamina1h: state.stamina_1h_remaining_milli,
-        stamina1d: state.stamina_1d_remaining_milli,
-        stamina5sLimit: state.stamina_5s_limit_milli,
-        stamina1hLimit: state.stamina_1h_limit_milli,
-        stamina1dLimit: state.stamina_1d_limit_milli,
-        currentJoinMode: state.current_join_mode,
-        life: state.life,
-        snapshotId: state.snapshot_id,
-        observedAt: state.observed_at
+      state: currentState ? {
+        hp: currentState.hp,
+        maxHp: currentState.max_hp,
+        x: currentState.x,
+        y: currentState.y,
+        invulnerableRemainingSecs: numeric(currentState.invulnerable_remaining_secs),
+        loss: numeric(currentState.death_loss_preview),
+        stamina5s: currentState.stamina_5s_remaining_milli,
+        stamina1h: currentState.stamina_1h_remaining_milli,
+        stamina1d: currentState.stamina_1d_remaining_milli,
+        stamina5sLimit: currentState.stamina_5s_limit_milli,
+        stamina1hLimit: currentState.stamina_1h_limit_milli,
+        stamina1dLimit: currentState.stamina_1d_limit_milli,
+        currentJoinMode: currentState.current_join_mode,
+        life: currentState.life,
+        snapshotId: currentState.snapshot_id,
+        observedAt: currentState.observed_at
       } : null
     };
   }
@@ -782,7 +796,7 @@ class ProjectionEngine {
   selectRealtimePlayers(today) {
     const views = Array.from(this.players.keys())
       .map(uid => this.currentPlayerView(uid, { from: today, to: today }, today))
-      .filter(player => player?.online);
+      .filter(Boolean);
     const selected = new Set();
     const top = value => views
       .filter(player => value(player) !== null && value(player) !== undefined && Number.isFinite(Number(value(player))))

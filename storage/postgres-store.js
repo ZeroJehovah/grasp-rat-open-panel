@@ -88,7 +88,7 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
     todayIncome,
     kills: Number(stats.kills || 0),
     deaths: Number(stats.deaths || 0),
-    state: row.state ? {
+    state: row.state && isCurrentDay ? {
       hp: state.hp ?? null,
       maxHp: state.max_hp ?? null,
       x: state.x ?? null,
@@ -321,7 +321,7 @@ class PostgresPanelStore {
         LEFT JOIN player_state_current c ON c.user_id = p.user_id
         LEFT JOIN player_quota_current q ON q.user_id = p.user_id
         LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
-        WHERE c.server_day = $1::date AND c.online = true`, [latest.server_day]),
+        `, [latest.server_day]),
       this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id', [latest.server_day]),
       this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id', [latest.server_day]),
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats WHERE local_date = $1::date', [latest.server_day]),
@@ -482,15 +482,14 @@ class PostgresPanelStore {
             d.income,
             s.kills, s.deaths
           FROM players p
-          INNER JOIN player_state_current c ON c.user_id = p.user_id
-          LEFT JOIN player_quota_current q ON q.user_id = p.user_id AND q.quota_day = $1::date
+          LEFT JOIN player_state_current c ON c.user_id = p.user_id
+          LEFT JOIN player_quota_current q ON q.user_id = p.user_id
           LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
           LEFT JOIN player_daily_stats s ON s.user_id = p.user_id AND s.local_date = $1::date
-          WHERE c.server_day = $1::date AND c.online = true
         ), quota_top AS (
           SELECT user_id FROM player_rows WHERE quota_value IS NOT NULL ORDER BY quota_value DESC, user_id LIMIT 50
         ), drop_top AS (
-          SELECT user_id FROM player_rows WHERE NULLIF(state->>'death_drop_coins', '')::numeric IS NOT NULL ORDER BY NULLIF(state->>'death_drop_coins', '')::numeric DESC, user_id LIMIT 50
+          SELECT user_id FROM player_rows WHERE server_day = $1::text AND NULLIF(state->>'death_drop_coins', '')::numeric IS NOT NULL ORDER BY NULLIF(state->>'death_drop_coins', '')::numeric DESC, user_id LIMIT 50
         ), income_top AS (
           SELECT user_id FROM player_rows WHERE income IS NOT NULL ORDER BY income DESC, user_id LIMIT 50
         ), candidates AS (
