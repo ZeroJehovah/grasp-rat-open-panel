@@ -110,45 +110,72 @@ test('map camera exposes axes, viewport readout and player details', async ({ pa
   await expect(page.getByRole('button', { name: '缩小地图' })).toBeVisible();
 });
 
+test('dragging the map does not select map labels', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/map');
+  const mapSquare = page.locator('.map-square');
+  await expect(mapSquare).toHaveCSS('user-select', 'none');
+  await page.getByRole('button', { name: '放大地图' }).click();
+  const box = await mapSquare.boundingBox();
+  if (!box) throw new Error('map stage is not measurable');
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.7);
+  await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString() || '')).toBe('');
+});
+
 test('map Drop threshold uses a wheel-adjustable slider and filters players', async ({ page }) => {
   await mockApi(page);
   await page.goto('/realtime/map');
   const slider = page.getByRole('slider', { name: '地图 Drop 阈值' });
-  await expect(slider).toHaveValue('10');
+  await expect(slider).toHaveAttribute('aria-valuenow', '10');
+  await expect(slider).toHaveAttribute('min', '1');
+  await expect(slider).toHaveAttribute('max', '1000');
+  await expect(slider).toHaveAttribute('step', '10');
   await expect(page.locator('.drop-threshold-value')).toHaveText('10');
   await slider.hover();
   await page.mouse.wheel(0, -100);
-  await expect(slider).toHaveValue('11');
-  await expect(page.locator('.drop-threshold-value')).toHaveText('11');
+  await expect(slider).toHaveAttribute('aria-valuenow', '20');
+  await expect(page.locator('.drop-threshold-value')).toHaveText('20');
   await slider.press('ArrowRight');
-  await expect(slider).toHaveValue('12');
+  await expect(slider).toHaveAttribute('aria-valuenow', '30');
   await slider.press('ArrowRight');
-  await expect(slider).toHaveValue('13');
+  await expect(slider).toHaveAttribute('aria-valuenow', '40');
   await expect(page.getByText('0 位玩家')).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem('grasp-rat:map-drop-threshold'))).toBe('13');
+  await slider.press('Home');
+  await expect(slider).toHaveAttribute('aria-valuenow', '1');
+  const sliderBox = await slider.boundingBox();
+  if (!sliderBox) throw new Error('map threshold slider is not measurable');
+  await page.mouse.click(sliderBox.x + sliderBox.width - 1, sliderBox.y + sliderBox.height / 2);
+  await expect(slider).toHaveAttribute('aria-valuenow', '1000');
+  expect(await page.evaluate(() => localStorage.getItem('grasp-rat:map-drop-threshold'))).toBe('1000');
 });
 
 test('kill Drop threshold uses a wheel-adjustable slider and filters kills', async ({ page }) => {
   await mockApi(page);
   await page.route('**/api/v1/realtime/kills*', route => route.fulfill({ json: response('realtime', 'kills', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, kills: [
     { kill_id: 'small-kill', event_at: '2026-08-23T00:02:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'fixture-player', victim_name: 'small-victim', confidence: 'confirmed', drop: { amount: 8 }, victim_position: { x: 1, y: 2 } },
-    { kill_id: 'large-kill', event_at: '2026-08-23T00:03:00+08:00', killer_user_id: 7, victim_user_id: 9, killer_name: 'fixture-player', victim_name: 'large-victim', confidence: 'confirmed', drop: { amount: 12 }, victim_position: { x: 3, y: 4 } }
+    { kill_id: 'large-kill', event_at: '2026-08-23T00:03:00+08:00', killer_user_id: 7, victim_user_id: 9, killer_name: 'fixture-player', victim_name: 'large-victim', confidence: 'confirmed', drop: { amount: 32 }, victim_position: { x: 3, y: 4 } }
   ] }) }));
   await page.goto('/realtime/kills');
   const slider = page.getByRole('slider', { name: '击杀 Drop 阈值' });
-  await expect(slider).toHaveValue('10');
+  await expect(slider).toHaveAttribute('aria-valuenow', '10');
+  await expect(slider).toHaveAttribute('min', '1');
+  await expect(slider).toHaveAttribute('max', '1000');
+  await expect(slider).toHaveAttribute('step', '10');
   const killBody = page.locator('.kill-table tbody');
   await expect(killBody.getByText('small-victim')).toHaveCount(0);
   await expect(killBody.getByText('large-victim')).toBeVisible();
   await slider.hover();
   await page.mouse.wheel(0, -100);
-  await expect(slider).toHaveValue('11');
+  await expect(slider).toHaveAttribute('aria-valuenow', '20');
   await slider.press('ArrowRight');
-  await expect(slider).toHaveValue('12');
+  await expect(slider).toHaveAttribute('aria-valuenow', '30');
   await slider.press('ArrowRight');
-  await expect(slider).toHaveValue('13');
+  await expect(slider).toHaveAttribute('aria-valuenow', '40');
   await expect(killBody.getByText('large-victim')).toHaveCount(0);
-  expect(await page.evaluate(() => localStorage.getItem('grasp-rat:kill-drop-threshold'))).toBe('13');
+  expect(await page.evaluate(() => localStorage.getItem('grasp-rat:kill-drop-threshold'))).toBe('40');
 });
 
 test('chat filter folds adjacent kills into a visible summary', async ({ page }) => {

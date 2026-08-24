@@ -123,8 +123,8 @@ h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
 .small-button { width: 28px; height: 28px; border-radius: 4px; font-size: 17px; line-height: 1; }
 .map-stage { container-type: size; position: relative; min-height: 0; flex: 1; display: grid; place-items: center; overflow: hidden; border-top: 1px solid var(--line); background: #c6d2cd; }
 :root[data-theme="dark"] .map-stage { background: #213436; }
-.map-square { position: relative; width: min(100cqw, 100cqh); height: min(100cqw, 100cqh); overflow: hidden; touch-action: none; }
-.map-square svg { display: block; width: 100%; height: 100%; }
+.map-square { position: relative; width: min(100cqw, 100cqh); height: min(100cqw, 100cqh); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
+.map-square svg { display: block; width: 100%; height: 100%; user-select: none; -webkit-user-select: none; }
 .map-water { fill: #c7d5d1; }
 :root[data-theme="dark"] .map-water { fill: #1d3033; }
 .map-land { fill: #d8d5bf; stroke: #9aa696; stroke-width: 3; }
