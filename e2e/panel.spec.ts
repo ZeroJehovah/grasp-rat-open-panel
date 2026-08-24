@@ -110,6 +110,47 @@ test('map camera exposes axes, viewport readout and player details', async ({ pa
   await expect(page.getByRole('button', { name: '缩小地图' })).toBeVisible();
 });
 
+test('map Drop threshold uses a wheel-adjustable slider and filters players', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/map');
+  const slider = page.getByRole('slider', { name: '地图 Drop 阈值' });
+  await expect(slider).toHaveValue('10');
+  await expect(page.locator('.drop-threshold-value')).toHaveText('10');
+  await slider.hover();
+  await page.mouse.wheel(0, -100);
+  await expect(slider).toHaveValue('11');
+  await expect(page.locator('.drop-threshold-value')).toHaveText('11');
+  await slider.press('ArrowRight');
+  await expect(slider).toHaveValue('12');
+  await slider.press('ArrowRight');
+  await expect(slider).toHaveValue('13');
+  await expect(page.getByText('0 位玩家')).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('grasp-rat:map-drop-threshold'))).toBe('13');
+});
+
+test('kill Drop threshold uses a wheel-adjustable slider and filters kills', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/api/v1/realtime/kills*', route => route.fulfill({ json: response('realtime', 'kills', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, kills: [
+    { kill_id: 'small-kill', event_at: '2026-08-23T00:02:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'fixture-player', victim_name: 'small-victim', confidence: 'confirmed', drop: { amount: 8 }, victim_position: { x: 1, y: 2 } },
+    { kill_id: 'large-kill', event_at: '2026-08-23T00:03:00+08:00', killer_user_id: 7, victim_user_id: 9, killer_name: 'fixture-player', victim_name: 'large-victim', confidence: 'confirmed', drop: { amount: 12 }, victim_position: { x: 3, y: 4 } }
+  ] }) }));
+  await page.goto('/realtime/kills');
+  const slider = page.getByRole('slider', { name: '击杀 Drop 阈值' });
+  await expect(slider).toHaveValue('10');
+  const killBody = page.locator('.kill-table tbody');
+  await expect(killBody.getByText('small-victim')).toHaveCount(0);
+  await expect(killBody.getByText('large-victim')).toBeVisible();
+  await slider.hover();
+  await page.mouse.wheel(0, -100);
+  await expect(slider).toHaveValue('11');
+  await slider.press('ArrowRight');
+  await expect(slider).toHaveValue('12');
+  await slider.press('ArrowRight');
+  await expect(slider).toHaveValue('13');
+  await expect(killBody.getByText('large-victim')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('grasp-rat:kill-drop-threshold'))).toBe('13');
+});
+
 test('chat filter folds adjacent kills into a visible summary', async ({ page }) => {
   await mockApi(page);
   await page.route('**/api/v1/realtime/chat*', route => route.fulfill({ json: response('realtime', 'chat', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, messages: [{ message_id: 'chat', kind: 'chat', text: 'hello', event_at: player.state.observedAt }, { message_id: 'kill-1', kind: 'kill', text: 'killer killed victim one', event_at: '2026-08-23T00:02:00+08:00' }, { message_id: 'kill-2', kind: 'kill', text: 'killer killed victim two', event_at: '2026-08-23T00:03:00+08:00' }, { message_id: 'chat-2', kind: 'chat', text: 'after kills', event_at: '2026-08-23T00:04:00+08:00' }] }) }));
