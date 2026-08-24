@@ -33,6 +33,17 @@ function displayNumber(value: number | null | undefined): string {
   return value === null || value === undefined || Number.isNaN(value) ? '--' : Math.round(value).toLocaleString('zh-CN');
 }
 
+const EXTERNAL_BALANCE_PER_QUOTA = 500_000;
+
+function quotaFromExternalBalance(value: number | null | undefined): number | null {
+  return value === null || value === undefined || !Number.isFinite(value) ? null : value / EXTERNAL_BALANCE_PER_QUOTA;
+}
+
+function displayQuota(value: number | null | undefined): string {
+  const quota = quotaFromExternalBalance(value);
+  return quota === null ? '--' : quota.toLocaleString('zh-CN', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+}
+
 function displayCoordinate(value: number | null | undefined): string {
   return value === null || value === undefined || !Number.isFinite(value) ? '--' : Math.round(value).toLocaleString('zh-CN');
 }
@@ -61,6 +72,16 @@ function defaultHistoryRange(meta: MetaResponse): { from: string; to: string } |
 function formatSeconds(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '--';
   return `${Math.max(0, Math.round(value))}秒`;
+}
+
+function formatOfflineStatus(value: string | null): string {
+  if (!value) return '离线';
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return '离线';
+  const elapsedMs = Math.max(0, Date.now() - timestamp);
+  const units: [number, string][] = [[86_400_000, '天'], [3_600_000, '小时'], [60_000, '分钟'], [1_000, '秒']];
+  const unit = units.find(([duration]) => elapsedMs >= duration) || units.at(-1)!;
+  return `${Math.max(1, Math.floor(elapsedMs / unit[0]))}${unit[1]}前在线`;
 }
 
 const DROP_THRESHOLD_MIN = 1;
@@ -359,10 +380,10 @@ function positionForCoordinates(x: number | null, y: number | null, map: MapMeta
   return { distance, direction: map.directions[index] || '未知', color: distance <= 1000 ? 'good' : 'warn' };
 }
 
-function PositionCell({ x, y, map, empty = false }: { x: number | null; y: number | null; map: MapMetadata; empty?: boolean }) {
+function PositionCells({ x, y, map, empty = false }: { x: number | null; y: number | null; map: MapMetadata; empty?: boolean }) {
   const position = positionForCoordinates(x, y, map);
-  if (empty) return <span className="position-cell muted">--</span>;
-  return <span className={`position-cell ${position.color}`}><span>x {displayCoordinate(x)} / y {displayCoordinate(y)}</span><span>{position.direction} · {position.distance === null ? '--' : `${displayNumber(position.distance)}米`}</span></span>;
+  if (empty) return <><td><span className="position-cell coordinate-cell muted">--</span></td><td><span className="position-cell direction-cell muted">--</span></td></>;
+  return <><td><span className="position-cell coordinate-cell"><span>x {displayCoordinate(x)} / y {displayCoordinate(y)}</span></span></td><td><span className={`position-cell direction-cell ${position.color}`}><span>{position.direction} · {position.distance === null ? '--' : `${displayNumber(position.distance)}米`}</span></span></td></>;
 }
 
 type StaminaState = Pick<PlayerState, 'stamina5s' | 'stamina5sLimit' | 'stamina1d' | 'stamina1dLimit'>;
@@ -404,7 +425,7 @@ function PlayersTable({ players, map, scope }: { players: Player[]; map: MapMeta
   }, [isRealtime, sort]);
   const setSortKey = (key: PlayerSort) => { setSort(key); localStorage.setItem(PLAYER_SORT_KEY, `${key}:desc`); };
   const sorted = useMemo(() => players.slice().sort((a, b) => {
-    const value = (player: Player): number | null => ({ drop: player.drop, quota: player.quota?.value ?? null, income: player.income, kills: player.kills, deaths: player.deaths }[sort] ?? null);
+    const value = (player: Player): number | null => ({ drop: player.drop, quota: quotaFromExternalBalance(player.externalBalanceSnapshot), income: player.income, kills: player.kills, deaths: player.deaths }[sort] ?? null);
     const av = value(a); const bv = value(b);
     if (av === null && bv === null) return a.name.localeCompare(b.name) || a.userId - b.userId;
     if (av === null) return 1;
@@ -415,11 +436,11 @@ function PlayersTable({ players, map, scope }: { players: Player[]; map: MapMeta
   const incomeLabel = isRealtime ? '今日收益' : '收益';
   const killsLabel = isRealtime ? '今日击杀' : '击杀';
   const deathsLabel = isRealtime ? '今日死亡' : '死亡';
-  return <div className="table-shell" aria-label="玩家表格滚动区"><table className={isRealtime ? 'player-table realtime-table' : 'player-table history-table'}><colgroup><col className="col-rank" /><col className="col-name" />{isRealtime && <><col className="col-status" /><col className="col-number" /><col className="col-number" /></>}<col className="col-number" />{isRealtime && <><col className="col-hp" /><col className="col-stamina" /><col className="col-position" /></>}<col className="col-number" /><col className="col-number" /></colgroup><thead><tr><th>#</th><th>名称</th>{isRealtime && <><th>状态</th><th className="numeric-head">{header('drop', 'Drop')}</th><th className="numeric-head">{header('quota', '额度')}</th></>}<th className="numeric-head">{header('income', incomeLabel)}</th>{isRealtime && <><th className="numeric-head">HP</th><th>体力</th><th>位置</th></>}<th className="numeric-head">{header('kills', killsLabel)}</th><th className="numeric-head">{header('deaths', deathsLabel)}</th></tr></thead><tbody>{sorted.length === 0 ? <tr><td colSpan={isRealtime ? 11 : 5}><EmptyState text="这个范围还没有玩家数据" /></td></tr> : sorted.map((player, index) => {
+  return <div className="table-shell" aria-label="玩家表格滚动区"><table className={isRealtime ? 'player-table realtime-table' : 'player-table history-table'}><colgroup><col className="col-rank" /><col className="col-name" />{isRealtime && <><col className="col-status" /><col className="col-number" /><col className="col-number" /></>}<col className="col-number" />{isRealtime && <><col className="col-hp" /><col className="col-stamina" /><col className="col-position-coordinate" /><col className="col-position-direction" /></>}<col className="col-number" /><col className="col-number" /></colgroup><thead><tr><th>#</th><th>名称</th>{isRealtime && <><th>状态</th><th className="numeric-head">{header('drop', 'Drop')}</th><th className="numeric-head">{header('quota', '额度')}</th></>}<th className="numeric-head">{header('income', incomeLabel)}</th>{isRealtime && <><th className="numeric-head">HP</th><th>体力</th><th>坐标</th><th>相对中心点</th></>}<th className="numeric-head">{header('kills', killsLabel)}</th><th className="numeric-head">{header('deaths', deathsLabel)}</th></tr></thead><tbody>{sorted.length === 0 ? <tr><td colSpan={isRealtime ? 12 : 5}><EmptyState text="这个范围还没有玩家数据" /></td></tr> : sorted.map((player, index) => {
     const hp = player.state?.hp ?? null;
     const positionX = isRealtime && !player.online ? null : player.state?.x ?? null;
     const positionY = isRealtime && !player.online ? null : player.state?.y ?? null;
-    return <tr key={player.userId}><td className="rank numeric">{index + 1}</td><td className="name-cell" title={player.name}>{player.name || '未命名'}</td>{isRealtime && <><td><span className={player.online ? 'status online' : 'status'}>{player.online ? '在线' : '离线'}</span></td><td className="numeric">{displayNumber(player.drop)}</td><td className="numeric">{displayNumber(player.quota?.value)}</td></>}<td className={`numeric ${player.income !== null && player.income > 0 ? 'negative' : player.income !== null && player.income < 0 ? 'positive' : ''}`}>{player.income === null ? '--' : player.income > 0 ? `+${displayNumber(player.income)}` : displayNumber(player.income)}</td>{isRealtime && <><td className={`numeric ${valueColor(hp, [[80, 'good'], [50, 'warn'], [20, 'orange'], [0, 'bad']])}`}>{displayNumber(hp)}</td><td><StaminaCell player={player} /></td><td><PositionCell x={positionX} y={positionY} map={map} empty={!player.online} /></td></>}<td className="numeric">{displayNumber(player.kills)}</td><td className="numeric">{displayNumber(player.deaths)}</td></tr>;
+    return <tr key={player.userId}><td className="rank">{index + 1}</td><td className="name-cell" title={player.name}>{player.name || '未命名'}</td>{isRealtime && <><td><span className={player.online ? 'status online' : 'status'}>{player.online ? '在线' : formatOfflineStatus(player.lastSeenAt)}</span></td><td className="numeric">{displayNumber(player.drop)}</td><td className="numeric">{displayQuota(player.externalBalanceSnapshot)}</td></>}<td className={`numeric ${player.income !== null && player.income > 0 ? 'negative' : player.income !== null && player.income < 0 ? 'positive' : ''}`}>{player.income === null ? '--' : player.income > 0 ? `+${displayNumber(player.income)}` : displayNumber(player.income)}</td>{isRealtime && <><td className={`numeric ${valueColor(hp, [[80, 'good'], [50, 'warn'], [20, 'orange'], [0, 'bad']])}`}>{displayNumber(hp)}</td><td><StaminaCell player={player} /></td><PositionCells x={positionX} y={positionY} map={map} empty={!player.online} /></>}<td className="numeric">{displayNumber(player.kills)}</td><td className="numeric">{displayNumber(player.deaths)}</td></tr>;
   })}</tbody></table></div>;
 }
 
@@ -519,7 +540,7 @@ function KillTable({ kills, map }: { kills: Kill[]; map: MapMetadata }) {
   const filtered = useMemo(() => kills.slice().filter(kill => { const amount = kill.drop?.amount; if (amount === null || amount === undefined || amount < threshold) return false; if (selected.length === 0) return true; return selected.includes(Number(kill.killer_user_id)) || selected.includes(Number(kill.victim_user_id)); }).sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || ''))), [kills, selected, threshold]);
   const onScroll = useAutoBottom(scrollRef, filtered.map(kill => `${kill.kill_id || kill.killId}:${kill.event_at || kill.eventAt}`).join('|'), filterVersion);
   const updateThreshold = (next: number) => { setThreshold(next); localStorage.setItem(KILL_THRESHOLD_KEY, String(next)); setFilterVersion(current => current + 1); };
-  return <section className="kill-page"><div className="filter-bar"><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} /><details><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{names.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(Number(id))} onChange={event => { setSelected(current => event.target.checked ? [...current, Number(id)] : current.filter(value => value !== Number(id))); setFilterVersion(current => current + 1); }} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={() => { setSelected([]); setFilterVersion(current => current + 1); }}><X size={13} />清除</button>}</div><div className="table-shell kill-scroll" ref={scrollRef} onScroll={onScroll} aria-label="击杀表格滚动区"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>置信度</th><th>位置</th><th className="numeric-head">掉落</th></tr></thead><tbody>{filtered.length === 0 ? <tr><td colSpan={7}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill); return <tr key={kill.kill_id || kill.killId || index}><td><time>{formatTime(kill.event_at || kill.eventAt)}</time></td><td>{kill.killer_name || '未知'}</td><td>{kill.victim_name || '未知'}</td><td><span className={`kill-type ${type === '活跃' ? 'active' : type === '挂机' ? 'idle' : 'unknown'}`}>{type}</span></td><td><span className={`confidence ${kill.confidence}`}>{kill.confidence || 'unknown'}</span></td><td><PositionCell x={position.x} y={position.y} map={map} /></td><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></section>;
+  return <section className="kill-page"><div className="filter-bar"><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} /><details><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{names.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(Number(id))} onChange={event => { setSelected(current => event.target.checked ? [...current, Number(id)] : current.filter(value => value !== Number(id))); setFilterVersion(current => current + 1); }} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={() => { setSelected([]); setFilterVersion(current => current + 1); }}><X size={13} />清除</button>}</div><div className="table-shell kill-scroll" ref={scrollRef} onScroll={onScroll} aria-label="击杀表格滚动区"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>置信度</th><th>坐标</th><th>相对中心点</th><th className="numeric-head">掉落</th></tr></thead><tbody>{filtered.length === 0 ? <tr><td colSpan={8}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill); return <tr key={kill.kill_id || kill.killId || index}><td><time>{formatTime(kill.event_at || kill.eventAt)}</time></td><td>{kill.killer_name || '未知'}</td><td>{kill.victim_name || '未知'}</td><td><span className={`kill-type ${type === '活跃' ? 'active' : type === '挂机' ? 'idle' : 'unknown'}`}>{type}</span></td><td><span className={`confidence ${kill.confidence}`}>{kill.confidence || 'unknown'}</span></td><PositionCells x={position.x} y={position.y} map={map} /><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></section>;
 }
 
 function ResourceContent({ route, meta, resource }: { route: PanelRoute; meta: MetaResponse; resource: ResourceResponse }) {

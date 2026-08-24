@@ -4,7 +4,7 @@ const meta = {
   map: { id: 'test-map', version: 1, bounds: { minX: -1000, maxX: 1000, minY: -1000, maxY: 1000 }, center: { x: 0, y: 0 }, directions: ['北', '东北', '东', '东南', '南', '西南', '西', '西北'], metersPerGameUnit: 1 },
   availableDates: ['2026-08-22', '2026-08-23'], earliestDate: '2026-08-22', latestDate: '2026-08-23', presetRanges: { today: { from: '2026-08-23', to: '2026-08-23' }, yesterday: { from: '2026-08-22', to: '2026-08-22' }, 'this-week': null, 'last-week': null, 'this-month': null, 'last-month': null }, timezone: 'Asia/Shanghai', schemaVersion: 'snapshot-v1', features: { realtime: true, history: true }
 };
-const player = { userId: 7, name: 'fixture-player', online: true, lastSeenAt: '2026-08-23T00:01:00+08:00', currentEntityId: 1, drop: 12, quota: { day: '2026-08-23', initial: 200, value: 204, income: 4 }, income: 4, kills: 1, deaths: 0, state: { hp: 100, maxHp: 100, x: 20, y: 10, invulnerableRemainingSecs: 0, loss: 2, stamina5s: 10000, stamina1h: 3000000, stamina1d: 20000000, stamina5sLimit: 10000, stamina1hLimit: 3000000, stamina1dLimit: 20000000, currentJoinMode: 'Passive', life: 'Alive', snapshotId: 'test', observedAt: '2026-08-23T00:01:00+08:00' } };
+const player = { userId: 7, name: 'fixture-player', online: true, lastSeenAt: '2026-08-23T00:01:00+08:00', currentEntityId: 1, drop: 12, externalBalanceSnapshot: 1250000, quota: { day: '2026-08-23', initial: 200, value: 204, income: 4 }, income: 4, kills: 1, deaths: 0, state: { hp: 100, maxHp: 100, x: 20, y: 10, invulnerableRemainingSecs: 0, loss: 2, stamina5s: 10000, stamina1h: 3000000, stamina1d: 20000000, stamina5sLimit: 10000, stamina1hLimit: 3000000, stamina1dLimit: 20000000, currentJoinMode: 'Passive', life: 'Alive', snapshotId: 'test', observedAt: '2026-08-23T00:01:00+08:00' } };
 const offlinePlayer = { ...player, userId: 8, name: 'offline-player', online: false, drop: 25, state: { ...player.state, x: 80, y: 90 } };
 
 function response(scope: 'realtime' | 'history', resource: string, payload: Record<string, unknown> = {}) {
@@ -42,6 +42,51 @@ test('desktop fixed shell starts at realtime chat and keeps the footer visible',
   await expect(page.getByText('fixture-player')).toBeVisible();
   expect(await page.evaluate(() => Math.abs(document.documentElement.scrollHeight - document.documentElement.clientHeight) <= 2)).toBe(true);
   await page.screenshot({ path: screenshotPath(testInfo), fullPage: true });
+});
+
+test('player and kill titles stay fixed while data panes scroll', async ({ page }) => {
+  const manyPlayers = Array.from({ length: 40 }, (_, index) => ({
+    ...player,
+    userId: 100 + index,
+    name: `player-${index}`,
+    externalBalanceSnapshot: 500000 + index * 500000,
+    state: { ...player.state, x: index, y: index }
+  }));
+  const manyKills = Array.from({ length: 40 }, (_, index) => ({
+    kill_id: `scroll-kill-${index}`,
+    event_at: `2026-08-23T00:${String(index % 60).padStart(2, '0')}:00+08:00`,
+    killer_user_id: 7,
+    victim_user_id: 100 + index,
+    killer_name: 'fixture-player',
+    victim_name: `victim-${index}`,
+    confidence: 'confirmed',
+    drop: { amount: 20 },
+    victim_position: { x: index, y: index }
+  }));
+  await mockApi(page, manyPlayers);
+  await page.route('**/api/v1/realtime/kills*', route => route.fulfill({ json: response('realtime', 'kills', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, kills: manyKills }) }));
+
+  await page.goto('/realtime/players');
+  const playerPane = page.locator('.players-panel .table-shell');
+  const playerTitle = page.locator('.players-panel .section-heading');
+  const playerBefore = await playerTitle.boundingBox();
+  const playerScroll = await playerPane.evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight }));
+  expect(playerScroll.scrollHeight).toBeGreaterThan(playerScroll.height);
+  await playerPane.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  const playerAfter = await playerTitle.boundingBox();
+  expect(Math.abs((playerBefore?.top || 0) - (playerAfter?.top || 0))).toBeLessThanOrEqual(1);
+
+  await page.getByRole('tab', { name: '击杀' }).click();
+  await expect(page.locator('.kill-table tbody td').filter({ hasText: 'victim-0' })).toBeVisible();
+  const killPane = page.locator('.kill-panel .kill-scroll');
+  const killTitle = page.locator('.kill-panel .kill-heading');
+  const killBefore = await killTitle.boundingBox();
+  const killScroll = await killPane.evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight }));
+  expect(killScroll.scrollHeight).toBeGreaterThan(killScroll.height);
+  await killPane.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  const killAfter = await killTitle.boundingBox();
+  expect(Math.abs((killBefore?.top || 0) - (killAfter?.top || 0))).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight === document.documentElement.clientHeight)).toBe(true);
 });
 
 test('history URL preserves range and browser back restores the previous tab', async ({ page }) => {
@@ -212,7 +257,11 @@ test('player rows keep stamina and position on one line and expose selection too
   await page.goto('/realtime/players');
   await expect(page.getByText('fixture-player')).toBeVisible();
   expect(await page.locator('.stamina-grid').evaluate(element => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(3);
-  await expect(page.locator('.position-cell')).toHaveCSS('display', 'grid');
+  await expect(page.locator('.realtime-table thead th').filter({ hasText: '坐标' })).toBeVisible();
+  await expect(page.locator('.realtime-table thead th').filter({ hasText: '相对中心点' })).toBeVisible();
+  await expect(page.locator('.rank')).toHaveCSS('text-align', 'left');
+  await expect(page.locator('.stamina-grid i').first()).toHaveCSS('text-align', 'right');
+  await expect(page.locator('.position-cell').first()).toHaveCSS('display', 'grid');
   const tooltip = page.locator('.tooltip');
   await tooltip.hover();
   await expect(tooltip).toHaveAttribute('data-tooltip', /额度 Top50、Drop Top50、收益 Top50/);
@@ -236,8 +285,16 @@ test('realtime player list includes qualifying offline players', async ({ page }
   await page.goto('/realtime/players');
   const row = page.locator('.player-table tbody tr').filter({ hasText: 'offline-player' });
   await expect(row).toHaveCount(1);
-  await expect(row.getByText('离线')).toBeVisible();
+  await expect(row.locator('.status')).toHaveText(/\d+(天|小时|分钟|秒)前在线/);
   await expect(row.locator('td').nth(3)).toHaveText('25');
   await expect(row.locator('td').nth(6)).toHaveText('100');
   await expect(row.locator('td').nth(8)).toHaveText('--');
+  await expect(row.locator('td').nth(9)).toHaveText('--');
+});
+
+test('realtime player quota uses external balance with three decimals', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/players');
+  const row = page.locator('.player-table tbody tr').filter({ hasText: 'fixture-player' });
+  await expect(row.locator('td').nth(4)).toHaveText('2.500');
 });

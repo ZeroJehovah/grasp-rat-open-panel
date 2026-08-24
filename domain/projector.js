@@ -28,6 +28,8 @@ const DEFAULT_MAP_METADATA = Object.freeze({
   metersPerGameUnit: 0.01
 });
 
+const EXTERNAL_BALANCE_PER_QUOTA = 500_000;
+
 function loadMapMetadata(options = {}) {
   const filePath = options.mapMetadataFile || process.env.PANEL_MAP_METADATA_FILE || path.resolve(__dirname, '../../data/map-metadata.json');
   try {
@@ -150,7 +152,6 @@ class ProjectionEngine {
     this.lastTouchedKills = [];
     this.dailyStats = new Map();
     this.quotaCurrent = new Map();
-    this.quotaAdjustments = [];
     this.dailyQuota = new Map();
     this.lastStableUsers = new Set();
     this.lastClosedUsers = [];
@@ -368,7 +369,7 @@ class ProjectionEngine {
     // current entity set may already reflect the post-kill state.
     this.projectMessages(parsed, version, entitiesByUser, previousStates);
     this.projectDrops(parsed, version);
-    this.projectQuota(parsed, version, previousStates);
+    this.projectQuota(parsed, version);
     this.lastStableUsers = new Set(entitiesByUser.keys());
     this.lastStableVersion = version;
   }
@@ -545,81 +546,31 @@ class ProjectionEngine {
     this.lastTouchedDrops = Array.from(touchedKeys).map(key => this.drops.get(key)).filter(Boolean);
   }
 
-  projectQuota(parsed, version, previousStates) {
+  projectQuota(parsed, version) {
     for (const entity of parsed.entities) {
       const uid = userKey(entity.user_id);
       if (!uid) continue;
-      const key = mapKey(parsed.serverDay, uid);
-      const drop = numeric(entity.death_drop_coins);
-      const loss = numeric(entity.death_loss_preview);
-      let quota = this.quotaCurrent.get(uid);
-      const previousState = previousStates.get(uid)?.state || previousStates.get(uid);
-      if (!quota || quota.quota_day !== parsed.serverDay) {
+      const externalBalance = numeric(entity.external_balance_snapshot);
+      const quotaValue = externalBalance === null ? null : externalBalance / EXTERNAL_BALANCE_PER_QUOTA;
+      const existingQuota = this.quotaCurrent.get(uid);
+      const resetBaseline = !existingQuota || existingQuota.quota_day !== parsed.serverDay || existingQuota.quota_source !== 'external_balance_snapshot';
+      let quota = existingQuota;
+      if (resetBaseline) {
         quota = {
           user_id: entity.user_id,
           quota_day: parsed.serverDay,
-          initial_quota: drop === null ? null : drop * 20,
-          quota_value: drop === null ? null : drop * 20,
-          last_drop: drop,
-          last_loss: loss,
+          initial_quota: quotaValue,
+          quota_value: quotaValue,
+          quota_source: 'external_balance_snapshot',
           last_snapshot_id: parsed.snapshotId,
           updated_at: version.observed_at
         };
         this.quotaCurrent.set(uid, quota);
-        this.quotaAdjustments.push({
-          user_id: entity.user_id,
-          local_date: parsed.serverDay,
-          snapshot_id: parsed.snapshotId,
-          observed_at: version.observed_at,
-          drop_before: null,
-          drop_after: drop,
-          loss_before: null,
-          adjustment: 0,
-          reason: 'daily_baseline',
-          computable: quota.initial_quota !== null
-        });
       } else {
-        const before = quota.last_drop;
-        let adjustment = 0;
-        let reason = 'unchanged';
-        let computable = true;
-        if (before !== null && drop !== null && drop > before) {
-          adjustment = 2 * (drop - before);
-          reason = 'drop_increase';
-        } else if (before !== null && drop !== null && drop < before) {
-          const lossBefore = numeric(previousState?.death_loss_preview);
-          reason = 'drop_decrease';
-          if (lossBefore === null) {
-            adjustment = null;
-            computable = false;
-          } else {
-            adjustment = -(before + lossBefore);
-          }
-        } else if (before === null || drop === null) {
-          adjustment = null;
-          computable = false;
-          reason = 'drop_or_previous_missing';
-        }
-        if (quota.quota_value !== null && adjustment !== null) quota.quota_value += adjustment;
-        else if (adjustment === null) quota.quota_value = null;
-        quota.last_drop = drop;
-        quota.last_loss = loss;
+        if (quota.initial_quota === null && quotaValue !== null) quota.initial_quota = quotaValue;
+        quota.quota_value = quotaValue;
         quota.last_snapshot_id = parsed.snapshotId;
         quota.updated_at = version.observed_at;
-        if (adjustment !== 0 || !computable) {
-          this.quotaAdjustments.push({
-            user_id: entity.user_id,
-            local_date: parsed.serverDay,
-            snapshot_id: parsed.snapshotId,
-            observed_at: version.observed_at,
-            drop_before: before,
-            drop_after: drop,
-            loss_before: before !== null ? numeric(previousState?.death_loss_preview) : null,
-            adjustment,
-            reason,
-            computable
-          });
-        }
       }
       const dailyKey = mapKey(parsed.serverDay, uid);
       const daily = this.dailyQuota.get(dailyKey) || {
@@ -631,6 +582,13 @@ class ProjectionEngine {
         finalized_at: null,
         source_snapshot_id: parsed.snapshotId
       };
+      if (resetBaseline) {
+        daily.initial_quota = quotaValue;
+        daily.closing_quota = quotaValue;
+        daily.income = 0;
+      } else if (daily.initial_quota === null && quota.initial_quota !== null) {
+        daily.initial_quota = quota.initial_quota;
+      }
       daily.closing_quota = quota.quota_value;
       daily.income = daily.initial_quota !== null && daily.closing_quota !== null ? daily.closing_quota - daily.initial_quota : null;
       daily.source_snapshot_id = parsed.snapshotId;
@@ -713,6 +671,7 @@ class ProjectionEngine {
       lastSeenAt: player.last_seen_at || null,
       currentEntityId: player.current_entity_id ?? null,
       drop: effectiveDrop,
+      externalBalanceSnapshot: currentState ? numeric(currentState.external_balance_snapshot) : null,
       quota,
       income,
       todayIncome,
@@ -802,7 +761,7 @@ class ProjectionEngine {
       .filter(player => value(player) !== null && value(player) !== undefined && Number.isFinite(Number(value(player))))
       .sort((a, b) => Number(value(b)) - Number(value(a)) || String(a.name).localeCompare(String(b.name)) || a.userId - b.userId)
       .slice(0, 50);
-    for (const player of top(player => player.quota?.value)) selected.add(player.userId);
+    for (const player of top(player => player.externalBalanceSnapshot)) selected.add(player.userId);
     for (const player of top(player => player.drop)) selected.add(player.userId);
     for (const player of top(player => player.todayIncome ?? player.quota?.income)) selected.add(player.userId);
     return views.filter(player => selected.has(player.userId));

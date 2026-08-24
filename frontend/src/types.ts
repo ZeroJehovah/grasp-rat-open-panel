@@ -44,6 +44,7 @@ export interface Player {
   lastSeenAt: string | null;
   currentEntityId: number | null;
   drop: number | null;
+  externalBalanceSnapshot: number | null;
   quota: QuotaView | null;
   income: number | null;
   todayIncome?: number | null;

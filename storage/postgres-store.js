@@ -27,6 +27,8 @@ function numberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+const EXTERNAL_BALANCE_PER_QUOTA = 500_000;
+
 function historyQuotaRow(row) {
   return {
     local_date: String(row.local_date).slice(0, 10),
@@ -68,6 +70,8 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
   const quotaValue = row.quota_value === null || row.quota_value === undefined ? null : Number(row.quota_value);
   const initialQuota = row.initial_quota === null || row.initial_quota === undefined ? null : Number(row.initial_quota);
   const currentDrop = state.death_drop_coins === undefined ? null : numberOrNull(state.death_drop_coins);
+  const externalBalanceSnapshot = isCurrentDay ? numberOrNull(state.external_balance_snapshot) : null;
+  const externalQuota = externalBalanceSnapshot === null ? null : externalBalanceSnapshot / EXTERNAL_BALANCE_PER_QUOTA;
   const todayIncome = row.today_income === undefined
     ? (row.income === null || row.income === undefined ? null : Number(row.income))
     : numberOrNull(row.today_income);
@@ -78,11 +82,12 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
     lastSeenAt: toDate(row.last_seen_at),
     currentEntityId: row.current_entity_id === null ? null : Number(row.current_entity_id),
     drop: isCurrentDay ? currentDrop : null,
+    externalBalanceSnapshot,
     quota: row.quota_day ? {
       day: row.quota_day,
       initial: initialQuota,
-      value: quotaValue,
-      income: initialQuota !== null && quotaValue !== null ? quotaValue - initialQuota : null
+      value: externalQuota ?? quotaValue,
+      income: initialQuota !== null && (externalQuota ?? quotaValue) !== null ? (externalQuota ?? quotaValue) - initialQuota : null
     } : null,
     income: row.income === null || row.income === undefined ? null : Number(row.income),
     todayIncome,
@@ -155,7 +160,7 @@ class PostgresPanelStore {
       this.query('SELECT user_id, entity_id, segment_id, snapshot_id, server_day::text, reset_generation, online, observed_at, state FROM player_state_current'),
       this.query('SELECT snapshot_id, user_id, segment_id, schema_version, state, observed_at FROM player_state_base ORDER BY observed_at'),
       this.query('SELECT snapshot_id, user_id, segment_id, changed_mask, changed_values, missing_fields, extra, observed_at FROM player_state_delta ORDER BY observed_at'),
-      this.query('SELECT user_id, quota_day::text, initial_quota, quota_value, last_drop, last_loss, last_snapshot_id, updated_at FROM player_quota_current'),
+      this.query('SELECT user_id, quota_day::text, initial_quota, quota_value, quota_source, last_snapshot_id, updated_at FROM player_quota_current'),
       this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id FROM player_daily_quota'),
       this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id, first_observed_at, last_observed_at FROM message_events'),
       this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events'),
@@ -239,8 +244,7 @@ class PostgresPanelStore {
         quota_day: String(row.quota_day).slice(0, 10),
         initial_quota: row.initial_quota === null ? null : Number(row.initial_quota),
         quota_value: row.quota_value === null ? null : Number(row.quota_value),
-        last_drop: row.last_drop === null ? null : Number(row.last_drop),
-        last_loss: row.last_loss === null ? null : Number(row.last_loss),
+        quota_source: row.quota_source || null,
         last_snapshot_id: row.last_snapshot_id,
         updated_at: toDate(row.updated_at)
       });
@@ -325,7 +329,7 @@ class PostgresPanelStore {
       this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id', [latest.server_day]),
       this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id', [latest.server_day]),
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats WHERE local_date = $1::date', [latest.server_day]),
-      this.query('SELECT user_id, quota_day::text, initial_quota, quota_value, last_drop, last_loss FROM player_quota_current WHERE quota_day = $1::date', [latest.server_day]),
+      this.query('SELECT user_id, quota_day::text, initial_quota, quota_value FROM player_quota_current WHERE quota_day = $1::date', [latest.server_day]),
       this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
     ]);
     const stats = new Map(statsResult.rows.map(row => [String(row.user_id), row]));
@@ -487,7 +491,10 @@ class PostgresPanelStore {
           LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
           LEFT JOIN player_daily_stats s ON s.user_id = p.user_id AND s.local_date = $1::date
         ), quota_top AS (
-          SELECT user_id FROM player_rows WHERE quota_value IS NOT NULL ORDER BY quota_value DESC, user_id LIMIT 50
+          SELECT user_id FROM player_rows
+          WHERE server_day = $1::text AND NULLIF(state->>'external_balance_snapshot', '')::numeric IS NOT NULL
+          ORDER BY NULLIF(state->>'external_balance_snapshot', '')::numeric DESC, user_id
+          LIMIT 50
         ), drop_top AS (
           SELECT user_id FROM player_rows WHERE server_day = $1::text AND NULLIF(state->>'death_drop_coins', '')::numeric IS NOT NULL ORDER BY NULLIF(state->>'death_drop_coins', '')::numeric DESC, user_id LIMIT 50
         ), income_top AS (
@@ -572,7 +579,6 @@ class PostgresPanelStore {
   async getHistoryKills(range) { return this.getHistoryResource('kills', range); }
 
   async applyObservation(body, metadata = {}) {
-    const beforeAdjustments = this.engine.quotaAdjustments.length;
     const result = this.engine.applyObservation(body, metadata);
     const client = await this.pool.connect();
     try {
@@ -591,7 +597,7 @@ class PostgresPanelStore {
           version.snapshot_id, version.version_token, version.server_day, version.reset_generation, version.server_tick, version.observed_at, version.received_at, version.entity_count, version.total_entities, version.bullet_count, version.coin_drop_count, version.message_count, version.payload_hash, version.completeness, version.schema_version, version.duplicate_poll_count, JSON.stringify(version.observation_ids), JSON.stringify(version.errors)
         ]);
       }
-      if (result.status === 'projected') await this.persistProjected(client, result, beforeAdjustments);
+      if (result.status === 'projected') await this.persistProjected(client, result);
       else if (result.status === 'warming_up') await this.persistWarmingEvents(client, result);
       await client.query('COMMIT');
       return result;
@@ -608,7 +614,7 @@ class PostgresPanelStore {
     }
   }
 
-  async persistProjected(client, result, beforeAdjustments) {
+  async persistProjected(client, result) {
     const { parsed, version } = result;
     const configuredMap = loadMapMetadata();
     if (configuredMap) this.engine.mapMetadata = configuredMap;
@@ -667,10 +673,7 @@ class PostgresPanelStore {
     }
     for (const quota of this.engine.quotaCurrent.values()) {
       if (quota.quota_day !== parsed.serverDay) continue;
-      await client.query(`INSERT INTO player_quota_current (user_id, quota_day, initial_quota, quota_value, last_drop, last_loss, last_snapshot_id, updated_at) VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8) ON CONFLICT (user_id) DO UPDATE SET quota_day = EXCLUDED.quota_day, initial_quota = EXCLUDED.initial_quota, quota_value = EXCLUDED.quota_value, last_drop = EXCLUDED.last_drop, last_loss = EXCLUDED.last_loss, last_snapshot_id = EXCLUDED.last_snapshot_id, updated_at = EXCLUDED.updated_at`, [quota.user_id, quota.quota_day, quota.initial_quota, quota.quota_value, quota.last_drop, quota.last_loss, quota.last_snapshot_id, quota.updated_at]);
-    }
-    for (const adjustment of this.engine.quotaAdjustments.slice(beforeAdjustments)) {
-      await client.query(`INSERT INTO player_quota_adjustments (user_id, local_date, snapshot_id, observed_at, drop_before, drop_after, loss_before, adjustment, reason, computable) VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10)`, [adjustment.user_id, adjustment.local_date, adjustment.snapshot_id, adjustment.observed_at, adjustment.drop_before, adjustment.drop_after, adjustment.loss_before, adjustment.adjustment, adjustment.reason, adjustment.computable]);
+      await client.query(`INSERT INTO player_quota_current (user_id, quota_day, initial_quota, quota_value, quota_source, last_snapshot_id, updated_at) VALUES ($1, $2::date, $3, $4, $5, $6, $7) ON CONFLICT (user_id) DO UPDATE SET quota_day = EXCLUDED.quota_day, initial_quota = EXCLUDED.initial_quota, quota_value = EXCLUDED.quota_value, quota_source = EXCLUDED.quota_source, last_snapshot_id = EXCLUDED.last_snapshot_id, updated_at = EXCLUDED.updated_at`, [quota.user_id, quota.quota_day, quota.initial_quota, quota.quota_value, quota.quota_source, quota.last_snapshot_id, quota.updated_at]);
     }
     for (const daily of this.engine.dailyQuota.values()) {
       if (daily.local_date !== parsed.serverDay) continue;

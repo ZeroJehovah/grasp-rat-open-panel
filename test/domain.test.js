@@ -45,7 +45,7 @@ function entity(overrides = {}) {
     death_loss_preview: 2,
     death_total_loss_preview: 3,
     daily_budget_day_key_utc8: 20687,
-    external_balance_snapshot: 100,
+    external_balance_snapshot: 50000000,
     coin_value_snapshot: 1,
     reward_pool_limit: 10,
     reward_dropped_today: 0,
@@ -107,10 +107,11 @@ function observation(engine, value, time) {
   assert.strictEqual(engine.stateBases.length, 1);
   assert.strictEqual(engine.stateDeltas.length, 2);
   assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 100);
-  assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 94);
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 100);
   const realtimePlayer = engine.getRealtimePlayers().players[0];
   assert.strictEqual(realtimePlayer.state.invulnerableRemainingSecs, 0);
   assert.strictEqual(realtimePlayer.state.loss, 2);
+  assert.strictEqual(realtimePlayer.externalBalanceSnapshot, 50000000);
   assert.strictEqual(engine.onlineIntervals[0].online_to_snapshot_id, null);
   assert.strictEqual(engine.messages.size, 0);
   assert.strictEqual(engine.verifyRebuild().ok, true);
@@ -140,16 +141,12 @@ function observation(engine, value, time) {
 
 (() => {
   const engine = new ProjectionEngine({ minSteadyEntities: 1 });
-  observation(engine, body(100, { entity: { death_drop_coins: 5, death_loss_preview: null } }), '00:20:00');
-  observation(engine, body(200, { entity: { death_drop_coins: 4, death_loss_preview: null } }), '00:21:00');
+  observation(engine, body(100, { entity: { death_drop_coins: 5, external_balance_snapshot: 1000000 } }), '00:20:00');
+  observation(engine, body(200, { entity: { death_drop_coins: 4, external_balance_snapshot: 1000000 } }), '00:21:00');
   const quota = engine.quotaCurrent.get('7');
-  const adjustment = engine.quotaAdjustments.at(-1);
-  assert.strictEqual(quota.initial_quota, 100);
-  assert.strictEqual(quota.quota_value, null);
-  assert.strictEqual(adjustment.reason, 'drop_decrease');
-  assert.strictEqual(adjustment.loss_before, null);
-  assert.strictEqual(adjustment.adjustment, null);
-  assert.strictEqual(adjustment.computable, false);
+  assert.strictEqual(quota.initial_quota, 2);
+  assert.strictEqual(quota.quota_value, 2);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-22:7').income, 0);
 })();
 
 (() => {
@@ -162,11 +159,11 @@ function observation(engine, value, time) {
 
 (() => {
   const engine = new ProjectionEngine({ minSteadyEntities: 1 });
-  observation(engine, body(500, { entity: { death_drop_coins: 5 } }), '00:22:00');
-  const nextDay = observation(engine, body(10, { entity: { death_drop_coins: 3, daily_budget_day_key_utc8: 20688 } }), '00:23:00');
+  observation(engine, body(500, { entity: { death_drop_coins: 5, external_balance_snapshot: 30000000 } }), '00:22:00');
+  const nextDay = observation(engine, body(10, { entity: { death_drop_coins: 3, external_balance_snapshot: 20000000, daily_budget_day_key_utc8: 20688 } }), '00:23:00');
   assert.strictEqual(nextDay.parsed.serverDay, '2026-08-23');
-  assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 60);
-  assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 60);
+  assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 40);
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 40);
   assert.strictEqual(engine.dailyQuota.get('2026-08-22:7').income, 0);
   engine.finalizeDay('2026-08-22', '2026-08-23T00:10:00.000Z');
   assert.ok(engine.dailyQuota.get('2026-08-22:7').finalized_at);
