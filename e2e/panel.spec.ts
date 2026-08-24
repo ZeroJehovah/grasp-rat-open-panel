@@ -142,6 +142,9 @@ test('narrow layout has no document overflow and map does not fall back to histo
 test('map camera exposes axes, viewport readout and player details', async ({ page }) => {
   await mockApi(page);
   await page.goto('/realtime/map');
+  await expect(page.locator('.map-panel .tooltip')).toHaveAttribute('data-tooltip', /Drop 达到当前阈值/);
+  await expect(page.locator('.map-land')).toHaveCount(0);
+  await expect(page.locator('.map-water')).toHaveCount(0);
   expect(await page.locator('.map-canvas').evaluate(element => { const rect = element.getBoundingClientRect(); return Math.abs(rect.width - rect.height); })).toBeGreaterThan(1);
   await expect(page.getByText('x=0')).toBeVisible();
   await expect(page.getByText('y=0')).toBeVisible();
@@ -259,12 +262,19 @@ test('player rows keep stamina and position on one line and expose selection too
   expect(await page.locator('.stamina-grid').evaluate(element => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length)).toBe(3);
   await expect(page.locator('.realtime-table thead th').filter({ hasText: '坐标' })).toBeVisible();
   await expect(page.locator('.realtime-table thead th').filter({ hasText: '相对中心点' })).toBeVisible();
+  await expect(page.locator('.realtime-table thead th').filter({ hasText: '体力' })).toHaveCSS('text-align', 'right');
+  await expect(page.locator('.realtime-table thead th')).toHaveText(['#', '名称', '状态', 'Drop', '额度', '今日收益', '今日击杀', '今日死亡', 'HP', '体力', '坐标', '相对中心点']);
   await expect(page.locator('.rank')).toHaveCSS('text-align', 'left');
   await expect(page.locator('.stamina-grid i').first()).toHaveCSS('text-align', 'right');
   await expect(page.locator('.position-cell').first()).toHaveCSS('display', 'grid');
   const tooltip = page.locator('.tooltip');
   await tooltip.hover();
   await expect(tooltip).toHaveAttribute('data-tooltip', /额度 Top50、Drop Top50、收益 Top50/);
+  await expect(page.locator('.sort-header.active .sort-desc')).toHaveCount(1);
+  await expect(page.locator('.sort-header:not(.active) .sort-desc')).toHaveCount(0);
+  await expect(page.locator('.sort-header:not(.active)').first()).toHaveCSS('text-decoration-line', 'underline');
+  await expect(page.locator('th').first()).toHaveCSS('padding-left', '12px');
+  await expect(page.locator('td').first()).toHaveCSS('padding-right', '12px');
 });
 
 test('history player rows only show historical aggregate columns', async ({ page }) => {
@@ -287,9 +297,23 @@ test('realtime player list includes qualifying offline players', async ({ page }
   await expect(row).toHaveCount(1);
   await expect(row.locator('.status')).toHaveText(/\d+(天|小时|分钟|秒)前在线/);
   await expect(row.locator('td').nth(3)).toHaveText('25');
-  await expect(row.locator('td').nth(6)).toHaveText('100');
-  await expect(row.locator('td').nth(8)).toHaveText('--');
-  await expect(row.locator('td').nth(9)).toHaveText('--');
+  await expect(row.locator('td').nth(8)).toHaveText('100');
+  await expect(row.locator('td').nth(10)).toHaveText('--');
+  await expect(row.locator('td').nth(11)).toHaveText('--');
+});
+
+test('realtime player list can show only online players', async ({ page }) => {
+  await mockApi(page, [player, offlinePlayer]);
+  await page.goto('/realtime/players');
+  const filter = page.getByRole('checkbox', { name: '仅看在线' });
+  await expect(filter).not.toBeChecked();
+  await expect(page.getByText('offline-player')).toBeVisible();
+  await filter.check();
+  await expect(filter).toBeChecked();
+  await expect(page.getByText('offline-player')).toHaveCount(0);
+  await expect(page.getByText('1 位玩家')).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('checkbox', { name: '仅看在线' })).toBeChecked();
 });
 
 test('realtime player quota uses external balance with three decimals', async ({ page }) => {
@@ -297,4 +321,6 @@ test('realtime player quota uses external balance with three decimals', async ({
   await page.goto('/realtime/players');
   const row = page.locator('.player-table tbody tr').filter({ hasText: 'fixture-player' });
   await expect(row.locator('td').nth(4)).toHaveText('2.500');
+  await expect(row.locator('.quota-integer')).toHaveText('2');
+  await expect(row.locator('.quota-fraction')).toHaveText('.500');
 });
