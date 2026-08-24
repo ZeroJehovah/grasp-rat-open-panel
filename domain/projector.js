@@ -29,6 +29,7 @@ const DEFAULT_MAP_METADATA = Object.freeze({
 });
 
 const EXTERNAL_BALANCE_PER_QUOTA = 500_000;
+const ROLLOVER_ZERO_GUARD_MS = 30 * 60 * 1000;
 
 function loadMapMetadata(options = {}) {
   const filePath = options.mapMetadataFile || process.env.PANEL_MAP_METADATA_FILE || path.resolve(__dirname, '../../data/map-metadata.json');
@@ -153,6 +154,7 @@ class ProjectionEngine {
     this.dailyStats = new Map();
     this.quotaCurrent = new Map();
     this.dailyQuota = new Map();
+    this.zeroBalanceGuards = new Map();
     this.lastStableUsers = new Set();
     this.lastClosedUsers = [];
     this.lastTouchedIntervals = [];
@@ -546,13 +548,45 @@ class ProjectionEngine {
     this.lastTouchedDrops = Array.from(touchedKeys).map(key => this.drops.get(key)).filter(Boolean);
   }
 
+  // The game flips daily_budget_day_key_utc8 before it refills the per-day
+  // entity fields, so the first frames of a new day report
+  // external_balance_snapshot = 0 for players who still hold a balance. Taking
+  // such a frame as the daily baseline turns the restored balance into a full
+  // day of phantom income, so a zero reading that would open a new day is held
+  // back until a trustworthy reading arrives. Only the baseline frames are
+  // guarded — once the day has a baseline, a balance that reaches zero is
+  // recorded immediately — and the hold expires so a player who really starts a
+  // day at zero is still recorded.
+  isRolloverZeroBalance(uid, quota, externalBalance, serverDay, observedAt) {
+    const guard = this.zeroBalanceGuards.get(uid);
+    const suspect = externalBalance === 0
+      && Boolean(quota)
+      && quota.quota_day !== serverDay
+      && quota.quota_value !== null
+      && quota.quota_value > 0;
+    if (!suspect) {
+      if (guard) this.zeroBalanceGuards.delete(uid);
+      return false;
+    }
+    if (!guard || guard.day !== serverDay) {
+      this.zeroBalanceGuards.set(uid, { day: serverDay, since: observedAt });
+      return true;
+    }
+    if (Date.parse(observedAt) - Date.parse(guard.since) > ROLLOVER_ZERO_GUARD_MS) {
+      this.zeroBalanceGuards.delete(uid);
+      return false;
+    }
+    return true;
+  }
+
   projectQuota(parsed, version) {
     for (const entity of parsed.entities) {
       const uid = userKey(entity.user_id);
       if (!uid) continue;
       const externalBalance = numeric(entity.external_balance_snapshot);
-      const quotaValue = externalBalance === null ? null : externalBalance / EXTERNAL_BALANCE_PER_QUOTA;
       const existingQuota = this.quotaCurrent.get(uid);
+      if (this.isRolloverZeroBalance(uid, existingQuota, externalBalance, parsed.serverDay, version.observed_at)) continue;
+      const quotaValue = externalBalance === null ? null : externalBalance / EXTERNAL_BALANCE_PER_QUOTA;
       const resetBaseline = !existingQuota || existingQuota.quota_day !== parsed.serverDay || existingQuota.quota_source !== 'external_balance_snapshot';
       let quota = existingQuota;
       if (resetBaseline) {

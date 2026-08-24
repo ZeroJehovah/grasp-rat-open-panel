@@ -236,4 +236,38 @@ function observation(engine, value, time) {
   assert.ok(history.players.some(player => player.userId === 101));
 })();
 
+(() => {
+  // The first frames of a new day can report external_balance_snapshot = 0
+  // before the game refills the per-day fields; they must not become the daily
+  // baseline, or the restored balance reads as a full day of income.
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  observation(engine, body(100, { entity: { external_balance_snapshot: 50000000 } }), '00:30:00');
+  observation(engine, body(200, { entity: { external_balance_snapshot: 0, death_drop_coins: 0, daily_budget_day_key_utc8: 20688 } }), '00:30:15');
+  observation(engine, body(300, { entity: { external_balance_snapshot: 0, death_drop_coins: 0, daily_budget_day_key_utc8: 20688 } }), '00:30:30');
+  assert.strictEqual(engine.dailyQuota.get('2026-08-23:7'), undefined);
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_day, '2026-08-22');
+  observation(engine, body(400, { entity: { external_balance_snapshot: 50000000, daily_budget_day_key_utc8: 20688 } }), '00:40:00');
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_day, '2026-08-23');
+  assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 100);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-23:7').initial_quota, 100);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-23:7').income, 0);
+  // Once the day has a baseline a real drop to zero is recorded straight away.
+  observation(engine, body(500, { entity: { external_balance_snapshot: 0, daily_budget_day_key_utc8: 20688 } }), '00:41:00');
+  assert.strictEqual(engine.dailyQuota.get('2026-08-23:7').income, -100);
+})();
+
+(() => {
+  // A player who really starts a day at zero must still be recorded, so the
+  // hold above expires instead of masking the balance for the whole day.
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  observation(engine, body(100, { entity: { external_balance_snapshot: 50000000 } }), '00:50:00');
+  observation(engine, body(200, { entity: { external_balance_snapshot: 0, daily_budget_day_key_utc8: 20688 } }), '00:50:15');
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_day, '2026-08-22');
+  observation(engine, body(300, { entity: { external_balance_snapshot: 0, daily_budget_day_key_utc8: 20688 } }), '01:25:00');
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_day, '2026-08-23');
+  assert.strictEqual(engine.quotaCurrent.get('7').quota_value, 0);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-23:7').initial_quota, 0);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-23:7').income, 0);
+})();
+
 console.log('domain tests passed');

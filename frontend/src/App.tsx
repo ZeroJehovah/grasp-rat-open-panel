@@ -425,7 +425,7 @@ function initialPlayerSort(scope: 'realtime' | 'history' = 'realtime'): PlayerSo
   return value === 'drop' || value === 'quota' || value === 'income' || value === 'kills' || value === 'deaths' ? value : 'quota';
 }
 
-const PLAYER_SELECTION_TOOLTIP = '玩家列表显示额度 Top50、Drop Top50、收益 Top50 的并集；实时页包含符合条件的在线和离线玩家，历史页按所选日期范围聚合。';
+const PLAYER_SELECTION_TOOLTIP = '玩家列表显示额度 Top50、Drop Top50、收益 Top50 的并集；实时页包含在线、离线和今天从未上线的玩家，历史页按所选日期范围聚合。';
 const MAP_PLAYER_SELECTION_TOOLTIP = '地图显示 Drop 达到当前阈值或 1d 体力未满的玩家；只有拥有有效坐标的玩家会显示在地图上。';
 
 function PlayersTable({ players, map, scope }: { players: Player[]; map: MapMetadata; scope: 'realtime' | 'history' }) {

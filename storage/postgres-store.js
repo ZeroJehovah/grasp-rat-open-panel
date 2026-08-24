@@ -70,7 +70,10 @@ function rowToPlayer(row, stats = { kills: 0, deaths: 0 }, options = {}) {
   const quotaValue = row.quota_value === null || row.quota_value === undefined ? null : Number(row.quota_value);
   const initialQuota = row.initial_quota === null || row.initial_quota === undefined ? null : Number(row.initial_quota);
   const currentDrop = state.death_drop_coins === undefined ? null : numberOrNull(state.death_drop_coins);
-  const externalBalanceSnapshot = isCurrentDay ? numberOrNull(state.external_balance_snapshot) : null;
+  // The realtime player list also carries players who never came online today,
+  // so it asks for the last known balance even when the cached state row belongs
+  // to an earlier day. Drop, online and the live state stay day-gated.
+  const externalBalanceSnapshot = isCurrentDay || options.lastKnownBalance ? numberOrNull(state.external_balance_snapshot) : null;
   const externalQuota = externalBalanceSnapshot === null ? null : externalBalanceSnapshot / EXTERNAL_BALANCE_PER_QUOTA;
   const todayIncome = row.today_income === undefined
     ? (row.income === null || row.income === undefined ? null : Number(row.income))
@@ -482,6 +485,7 @@ class PostgresPanelStore {
       const result = await this.query(`WITH player_rows AS (
           SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
             c.server_day::text, c.snapshot_id, c.observed_at, c.state,
+            NULLIF(c.state->>'external_balance_snapshot', '')::numeric AS balance,
             q.quota_day::text, q.initial_quota, q.quota_value,
             d.income,
             s.kills, s.deaths
@@ -491,10 +495,10 @@ class PostgresPanelStore {
           LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
           LEFT JOIN player_daily_stats s ON s.user_id = p.user_id AND s.local_date = $1::date
         ), quota_top AS (
-          SELECT user_id FROM player_rows
-          WHERE server_day = $1::text AND NULLIF(state->>'external_balance_snapshot', '')::numeric IS NOT NULL
-          ORDER BY NULLIF(state->>'external_balance_snapshot', '')::numeric DESC, user_id
-          LIMIT 50
+          -- Quota keeps the last known balance of every player, so this branch is
+          -- deliberately not restricted to today: a player who never came online
+          -- today still belongs in the realtime list. Drop stays day-gated.
+          SELECT user_id FROM player_rows WHERE balance IS NOT NULL ORDER BY balance DESC, user_id LIMIT 50
         ), drop_top AS (
           SELECT user_id FROM player_rows WHERE server_day = $1::text AND NULLIF(state->>'death_drop_coins', '')::numeric IS NOT NULL ORDER BY NULLIF(state->>'death_drop_coins', '')::numeric DESC, user_id LIMIT 50
         ), income_top AS (
@@ -506,7 +510,7 @@ class PostgresPanelStore {
       const rows = limitedRows(result, 'players', HISTORY_ROW_LIMITS.players);
       return {
         ...common,
-        players: rows.map(row => rowToPlayer(row, { kills: Number(row.kills || 0), deaths: Number(row.deaths || 0) }, { currentDay: latest.server_day }))
+        players: rows.map(row => rowToPlayer(row, { kills: Number(row.kills || 0), deaths: Number(row.deaths || 0) }, { currentDay: latest.server_day, lastKnownBalance: true }))
       };
     }
     throw new Error(`unknown realtime resource: ${resource}`);
@@ -677,7 +681,7 @@ class PostgresPanelStore {
     }
     for (const daily of this.engine.dailyQuota.values()) {
       if (daily.local_date !== parsed.serverDay) continue;
-      await client.query(`INSERT INTO player_daily_quota (local_date, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id) VALUES ($1::date, $2, $3, $4, $5, $6, $7) ON CONFLICT (local_date, user_id) DO UPDATE SET closing_quota = EXCLUDED.closing_quota, income = EXCLUDED.income, finalized_at = COALESCE(player_daily_quota.finalized_at, EXCLUDED.finalized_at), source_snapshot_id = EXCLUDED.source_snapshot_id`, [daily.local_date, daily.user_id, daily.initial_quota, daily.closing_quota, daily.income, daily.finalized_at, daily.source_snapshot_id]);
+      await client.query(`INSERT INTO player_daily_quota (local_date, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id) VALUES ($1::date, $2, $3, $4, $5, $6, $7) ON CONFLICT (local_date, user_id) DO UPDATE SET initial_quota = COALESCE(player_daily_quota.initial_quota, EXCLUDED.initial_quota), closing_quota = EXCLUDED.closing_quota, income = EXCLUDED.income, finalized_at = COALESCE(player_daily_quota.finalized_at, EXCLUDED.finalized_at), source_snapshot_id = EXCLUDED.source_snapshot_id`, [daily.local_date, daily.user_id, daily.initial_quota, daily.closing_quota, daily.income, daily.finalized_at, daily.source_snapshot_id]);
     }
     await client.query(`INSERT INTO map_metadata (map_id, version, payload) VALUES ($1, $2, $3::jsonb) ON CONFLICT (map_id, version) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`, [this.engine.mapMetadata.id, this.engine.mapMetadata.version, JSON.stringify(this.engine.mapMetadata)]);
   }

@@ -12,6 +12,7 @@
     "migrate": "node commands/migrate.js",
     "projector": "node commands/projector-worker.js",
     "finalize-day": "node commands/finalize-day.js",
+    "rebuild-quota": "node commands/rebuild-quota-from-snapshots.js",
     "refresh-map": "node commands/refresh-map-metadata.js",
     "retention": "node commands/retention.js",
     "api": "node api/index.js",
