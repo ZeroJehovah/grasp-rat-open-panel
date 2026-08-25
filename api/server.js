@@ -228,7 +228,13 @@ async function buildServer(options = {}) {
       snapshotId: latest?.snapshot_id || null,
       observedAt: latest?.observed_at || null,
       serverDay: latest?.server_day || null,
-      serverTick: latest?.server_tick ?? null
+      serverTick: latest?.server_tick ?? null,
+      // The world repopulates for several minutes after a reset. The realtime
+      // views now follow it live, so they need to be able to say the entity set
+      // is still filling up rather than implying the world is this small.
+      completeness: latest?.completeness || null,
+      warmingUp: latest ? latest.completeness === 'warming_up' : false,
+      entityCount: latest?.entity_count ?? null
     });
   });
 

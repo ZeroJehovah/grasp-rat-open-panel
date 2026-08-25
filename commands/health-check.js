@@ -100,9 +100,12 @@ async function databaseHealth(connectionString, now = new Date()) {
   const client = new Client({ connectionString });
   try {
     await client.connect();
+    // Staleness and the version gap measure whether ingestion is still
+    // advancing, so they must not be gated on completeness: a world reset makes
+    // every version warming-up for as long as the entity set takes to grow back,
+    // which reported a growing lag while the pipeline was perfectly healthy.
     const result = await client.query(`SELECT observed_at
       FROM snapshot_versions
-      WHERE completeness = 'steady'
       ORDER BY observed_at DESC
       LIMIT 2`);
     const latest = result.rows[0]?.observed_at ? Date.parse(result.rows[0].observed_at) : NaN;

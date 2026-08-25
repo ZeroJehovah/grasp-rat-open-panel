@@ -93,6 +93,51 @@ function observation(engine, value, time) {
   assert.strictEqual(invalid.completeness, 'invalid');
 })();
 
+// 回归：世界重启后实体集要好几分钟才长回来。实时读必须跟着正在恢复的世界走，不能
+// 钉在前一天最后一个稳定版本上；同时在线区间和 base/delta 链只能由稳定快照驱动。
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 2 });
+  const a = entity({ user_id: 7, entity_id: 11, name: 'a' });
+  const b = entity({ user_id: 8, entity_id: 12, name: 'b' });
+  const steady = observation(engine, body(5000, { entities: [a, b] }), '00:01:00');
+  assert.strictEqual(steady.status, 'projected');
+  const bases = engine.stateBases.length;
+  const deltas = engine.stateDeltas.length;
+  const intervals = engine.onlineIntervals.length;
+
+  // tick 倒退：服务端重启了，世界正在重新填充。
+  const nextA = entity({ user_id: 7, entity_id: 21, name: 'a', daily_budget_day_key_utc8: 20688 });
+  const warming = observation(engine, body(11, { entities: [nextA] }), '00:02:00');
+  assert.strictEqual(warming.status, 'warming_up');
+  assert.strictEqual(warming.version.reset_generation, 1, '倒退的 tick 必须算作新一代');
+  assert.strictEqual(warming.version.server_day, '2026-08-23');
+
+  // 实时读跟随最新版本，而不是前一天最后一个稳定版本。
+  assert.strictEqual(engine.getLatestVersion().snapshot_id, warming.version.snapshot_id);
+  assert.strictEqual(engine.getLatestVersion().completeness, 'warming_up');
+  assert.strictEqual(engine.getLatestStableVersion().snapshot_id, steady.version.snapshot_id);
+  assert.strictEqual(engine.getRealtimeChat().serverDay, '2026-08-23', '实时聊天必须查当天，不能回落到前一天');
+  assert.strictEqual(engine.currentStates.get('7').server_day, '2026-08-23');
+  assert.strictEqual(engine.currentStates.get('7').entity_id, 21, '预热快照必须推进展示状态');
+  assert.strictEqual(engine.players.get('7').online, true);
+  assert.ok(engine.getAvailableDates().includes('2026-08-23'), '只有预热版本的当天也要出现在可选日期里');
+
+  // 不完整的实体集不能碰计时和历史重建。
+  assert.strictEqual(engine.onlineIntervals.length, intervals, '预热快照不能新开在线区间');
+  assert.ok(engine.onlineIntervals.every(interval => interval.online_to_at === null), '预热快照不能关闭上一日的在线区间');
+  assert.strictEqual(engine.stateBases.length, bases, '预热快照不能写 base');
+  assert.strictEqual(engine.stateDeltas.length, deltas, '预热快照不能写 delta');
+  assert.strictEqual(engine.verifyRebuild().ok, true);
+
+  // 预热后的首个稳定快照要用整条 base 重新锚定历史，而不是去 diff 一个从未落库的状态。
+  const nextB = entity({ user_id: 8, entity_id: 22, name: 'b', daily_budget_day_key_utc8: 20688 });
+  const recovered = observation(engine, body(12000, { entities: [nextA, nextB] }), '00:12:00');
+  assert.strictEqual(recovered.status, 'projected');
+  assert.strictEqual(engine.stateBases.length, bases + 2, '预热后的首个稳定快照要给两个玩家各写一条新 base');
+  assert.strictEqual(engine.stateDeltas.length, deltas, '跨代恢复不能产生 delta');
+  assert.strictEqual(engine.verifyRebuild().ok, true);
+})();
+
 (() => {
   const engine = new ProjectionEngine({ minSteadyEntities: 1 });
   const first = observation(engine, body(100), '00:01:00');

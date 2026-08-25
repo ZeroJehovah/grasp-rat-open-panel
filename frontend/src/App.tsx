@@ -233,10 +233,13 @@ interface ResourceQueryState {
   error: string | null;
   versionError: string | null;
   updatedAt: string | null;
+  // 世界重启后实体集合要几分钟才长回来。实时页跟的就是这段时间的最新版本，所以要说清楚
+  // 人少是因为世界在恢复，而不是数据停在了昨天。
+  warmingUp: boolean;
 }
 
 function useResourceQuery(route: PanelRoute, page: HistoryPageQuery | null): ResourceQueryState {
-  const [state, setState] = useState<ResourceQueryState>({ resource: null, loading: true, error: null, versionError: null, updatedAt: null });
+  const [state, setState] = useState<ResourceQueryState>({ resource: null, loading: true, error: null, versionError: null, updatedAt: null, warmingUp: false });
   const key = resourceKey(route);
   // 翻页和调过滤条件只换分页参数，不换标签：这时保留面板本身（分页器要留在原地，否则
   // 鼠标底下的按钮会消失），但 loading 会让面板把数据部分清空——留着上一页的行会让人
@@ -256,14 +259,14 @@ function useResourceQuery(route: PanelRoute, page: HistoryPageQuery | null): Res
     const sameRoute = lastKey.current === key;
     lastKey.current = key;
     let currentToken = cached?.versionToken || null;
-    setState(current => ({ resource: cached || (sameRoute ? current.resource : null), loading: !cached, error: null, versionError: null, updatedAt: cached?.generatedAt || (sameRoute ? current.updatedAt : null) }));
+    setState(current => ({ resource: cached || (sameRoute ? current.resource : null), loading: !cached, error: null, versionError: null, updatedAt: cached?.generatedAt || (sameRoute ? current.updatedAt : null), warmingUp: sameRoute ? current.warmingUp : false }));
 
     const loadRealtime = async () => {
-      let version;
+      let version: Awaited<ReturnType<typeof getVersion>>;
       try {
         version = await getVersion(controller.signal);
         if (disposed) return;
-        setState(current => ({ ...current, versionError: null }));
+        setState(current => ({ ...current, versionError: null, warmingUp: Boolean(version.warmingUp) }));
       } catch (error) {
         if (!disposed && (error as Error).name !== 'AbortError') setState(current => ({ ...current, loading: false, versionError: error instanceof Error ? error.message : String(error) }));
         return;
@@ -276,7 +279,7 @@ function useResourceQuery(route: PanelRoute, page: HistoryPageQuery | null): Res
         const next = await getResource('realtime', route.tab, currentToken, controller.signal);
         if (disposed) return;
         if (!next.unchanged) currentToken = next.versionToken || version.versionToken;
-        setState({ resource: next.unchanged ? cached : next, loading: false, error: null, versionError: null, updatedAt: next.unchanged ? cached?.generatedAt || null : new Date().toISOString() });
+        setState({ resource: next.unchanged ? cached : next, loading: false, error: null, versionError: null, updatedAt: next.unchanged ? cached?.generatedAt || null : new Date().toISOString(), warmingUp: Boolean(version.warmingUp) });
       } catch (error) {
         if (!disposed && (error as Error).name !== 'AbortError') setState(current => ({ ...current, loading: false, error: error instanceof Error ? error.message : String(error) }));
       }
@@ -285,11 +288,11 @@ function useResourceQuery(route: PanelRoute, page: HistoryPageQuery | null): Res
     const loadHistory = async () => {
       try {
         const next = await getResource('history', route.tab as 'chat' | 'players' | 'kills', { from: route.from!, to: route.to!, page }, controller.signal);
-        if (!disposed) setState({ resource: next, loading: false, error: null, versionError: null, updatedAt: next.generatedAt });
+        if (!disposed) setState({ resource: next, loading: false, error: null, versionError: null, updatedAt: next.generatedAt, warmingUp: false });
       } catch (error) {
         // 历史查询失败就把上一份结果一起丢掉：它属于另一组参数，留在屏幕上只会误导。
         // 实时是轮询，一次失败不该清屏，所以只有这条路径这么做。
-        if (!disposed && (error as Error).name !== 'AbortError') setState({ resource: null, loading: false, error: error instanceof Error ? error.message : String(error), versionError: null, updatedAt: null });
+        if (!disposed && (error as Error).name !== 'AbortError') setState({ resource: null, loading: false, error: error instanceof Error ? error.message : String(error), versionError: null, updatedAt: null, warmingUp: false });
       }
     };
 
@@ -401,7 +404,7 @@ function StatusBar({ meta, query, route }: { meta: MetaResponse; query: Resource
   const resourceLabel = route.tab === 'chat' ? '聊天' : route.tab === 'map' ? '地图' : route.tab === 'players' ? '玩家' : '击杀';
   const alert = query.versionError ? <><CircleAlert size={14} />实时版本检查失败：{query.versionError}</> : query.error ? <><CircleAlert size={14} />{resourceLabel}数据暂不可用：{query.error}</> : null;
   if (route.scope === 'history') return alert ? <div className="global-status" role="status">{alert}</div> : null;
-  return <div className="global-status" role="status">{alert || (query.loading ? <><RefreshCw size={14} className="spin" />正在加载{resourceLabel}…</> : <><span className="status-dot" />服务运行中 · {meta.timezone}{query.updatedAt ? ` · ${formatTime(query.updatedAt)}` : ''}</>)}</div>;
+  return <div className="global-status" role="status">{alert || (query.loading ? <><RefreshCw size={14} className="spin" />正在加载{resourceLabel}…</> : <><span className="status-dot" />服务运行中{query.warmingUp ? ' · 世界刚重启，实体仍在恢复' : ''} · {meta.timezone}{query.updatedAt ? ` · ${formatTime(query.updatedAt)}` : ''}</>)}</div>;
 }
 
 // 实时页的列表是"最新在下"，所以要黏在底部；历史页分页之后每页都是一个独立的片段，

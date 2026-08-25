@@ -1,7 +1,5 @@
--- getLatestVersion() 是每个 API 请求都会走的查询：版本轮询、算缓存键，以及 getMeta 和每个
--- 实时资源内部各自还要再查一次。它按全表的 observed_at 排序，而已有的
--- snapshot_versions_steady_time_idx 以 server_day 领头用不上，实测 5,516 行时是全表顺序
--- 扫描加 top-N 排序、5.0 ms，而这张表每天还要增长约 2,880 行。
-CREATE INDEX IF NOT EXISTS snapshot_versions_steady_observed_at_idx
-  ON snapshot_versions (observed_at DESC)
-  WHERE completeness = 'steady';
+-- 原本这里建的是 snapshot_versions (observed_at DESC) WHERE completeness = 'steady'。
+-- 实时读路径后来不再只认 `steady`（见 007），那个谓词让索引对任何现存查询都不可用，只剩
+-- 写入时的维护开销，所以改成把它删掉。索引本身由 007 以不带谓词的同形索引接手。
+-- 迁移目录每次部署都会按文件名顺序整体重放，因此这条必须保持幂等。
+DROP INDEX IF EXISTS snapshot_versions_steady_observed_at_idx;

@@ -212,6 +212,9 @@ class PostgresPanelStore {
     const latestStable = versions.filter(version => version.completeness === 'steady').at(-1) || null;
     const latestObserved = latestObservedResult.rows[0] || null;
     engine.lastStableVersion = latestStable;
+    // Rehydrate the realtime cursor too, otherwise a restart during a warming
+    // window would resume answering realtime reads from the last steady version.
+    engine.lastVersion = versions.at(-1) || null;
     engine.lastParserCursor = latestObserved ? {
       serverDay: String(latestObserved.server_day).slice(0, 10),
       serverTick: Number(latestObserved.server_tick),
@@ -315,7 +318,10 @@ class PostgresPanelStore {
 
   async getMeta() {
     const [dates, map] = await Promise.all([
-      this.query("SELECT DISTINCT server_day::text AS day FROM snapshot_versions WHERE completeness = 'steady' ORDER BY day"),
+      // Warming-up days count as available: right after a reset the current day
+      // only has warming versions, and omitting it drops today from the date
+      // pickers and the preset ranges built from this list.
+      this.query('SELECT DISTINCT server_day::text AS day FROM snapshot_versions ORDER BY day'),
       this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
     ]);
     const availableDates = dates.rows.map(row => row.day);
@@ -331,8 +337,13 @@ class PostgresPanelStore {
     };
   }
 
+  // The newest accepted version, warming-up included. `server_day` from this row
+  // day-gates every realtime query, so restricting it to steady versions made
+  // the realtime views serve the previous day for as long as the world took to
+  // repopulate after a reset. Only 'steady' and 'warming_up' are ever stored;
+  // invalid payloads never reach snapshot_versions.
   async getLatestVersion() {
-    const result = await this.query("SELECT snapshot_id, version_token, server_day::text, reset_generation, server_tick, observed_at, received_at, entity_count, total_entities, bullet_count, coin_drop_count, message_count, payload_hash, completeness, schema_version, duplicate_poll_count, observation_ids, errors FROM snapshot_versions WHERE completeness = 'steady' ORDER BY observed_at DESC LIMIT 1");
+    const result = await this.query('SELECT snapshot_id, version_token, server_day::text, reset_generation, server_tick, observed_at, received_at, entity_count, total_entities, bullet_count, coin_drop_count, message_count, payload_hash, completeness, schema_version, duplicate_poll_count, observation_ids, errors FROM snapshot_versions ORDER BY observed_at DESC LIMIT 1');
     return result.rows[0] || null;
   }
 
@@ -807,7 +818,25 @@ class PostgresPanelStore {
   }
 
   async persistWarmingEvents(client, result) {
-    const { parsed } = result;
+    const { parsed, version } = result;
+    // Display state for the entities this incomplete snapshot did contain. The
+    // realtime player and map views read these two tables and day-gate on the
+    // newest version's server_day, so without this a post-reset world would
+    // render empty until the entity set grew back past the steady threshold.
+    // Deliberately absent: online intervals, daily stats/quota and the
+    // base/delta chain, which stay driven by steady projections only.
+    for (const entity of parsed.entities) {
+      const uid = String(entity.user_id);
+      const player = this.engine.players.get(uid);
+      const state = this.engine.currentStates.get(uid);
+      if (!player || !state) continue;
+      await client.query(`INSERT INTO players (user_id, first_seen_at, last_seen_at, current_name, current_entity_id, online, last_snapshot_id, segment_id, updated_at)
+        VALUES ($1, $2, $2, $3, $4, true, $5, $6, now())
+        ON CONFLICT (user_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, current_name = EXCLUDED.current_name, current_entity_id = EXCLUDED.current_entity_id, online = true, last_snapshot_id = EXCLUDED.last_snapshot_id, segment_id = EXCLUDED.segment_id, updated_at = now()`, [entity.user_id, version.observed_at, player.current_name, entity.entity_id, version.snapshot_id, state.segment_id]);
+      await client.query(`INSERT INTO player_state_current (user_id, entity_id, segment_id, snapshot_id, server_day, reset_generation, online, observed_at, state, updated_at)
+        VALUES ($1, $2, $3, $4, $5::date, $6, true, $7, $8::jsonb, now())
+        ON CONFLICT (user_id) DO UPDATE SET entity_id = EXCLUDED.entity_id, segment_id = EXCLUDED.segment_id, snapshot_id = EXCLUDED.snapshot_id, server_day = EXCLUDED.server_day, reset_generation = EXCLUDED.reset_generation, online = true, observed_at = EXCLUDED.observed_at, state = EXCLUDED.state, updated_at = now()`, [entity.user_id, entity.entity_id, state.segment_id, version.snapshot_id, parsed.serverDay, parsed.resetGeneration, version.observed_at, JSON.stringify(entity)]);
+    }
     for (const message of this.engine.messages.values()) {
       if (message.last_observed_snapshot_id !== parsed.snapshotId) continue;
       await client.query(`INSERT INTO message_events (server_day, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id, first_observed_at, last_observed_at)

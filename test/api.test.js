@@ -99,7 +99,7 @@ function fixture() {
   const fakePool = {
     query: async (text, values) => {
       postgresCalls.push({ text, values });
-      if (text.includes('FROM snapshot_versions WHERE completeness')) return { rows: [{ snapshot_id: 'pg-s1', version_token: 'pg-v1', server_day: '2026-08-22', server_tick: 1, observed_at: '2026-08-22T00:00:00.000Z' }] };
+      if (text.includes('FROM snapshot_versions ORDER BY observed_at DESC')) return { rows: [{ snapshot_id: 'pg-s1', version_token: 'pg-v1', server_day: '2026-08-22', server_tick: 1, observed_at: '2026-08-22T00:00:00.000Z' }] };
       if (text.includes('FROM map_metadata')) return { rows: [{ payload: { id: 'pg-map', version: 1, bounds: { minX: -1, maxX: 1, minY: -1, maxY: 1 }, center: { x: 0, y: 0 }, directions: [], metersPerGameUnit: 1 } }] };
       return { rows: [] };
     }
@@ -326,7 +326,7 @@ function fixture() {
   // state 是 null，筛选"体力没满"时不能直接点进去，否则整个端点 500。
   const nullStatePool = {
     query: async text => {
-      if (text.includes('FROM snapshot_versions WHERE completeness')) return { rows: [{ snapshot_id: 'ns-s1', version_token: 'ns-v1', server_day: '2026-08-22', server_tick: 1, observed_at: '2026-08-22T00:00:00.000Z' }] };
+      if (text.includes('FROM snapshot_versions ORDER BY observed_at DESC')) return { rows: [{ snapshot_id: 'ns-s1', version_token: 'ns-v1', server_day: '2026-08-22', server_tick: 1, observed_at: '2026-08-22T00:00:00.000Z' }] };
       if (text.includes('LEFT JOIN player_quota_current')) return { rows: [{ user_id: 9, current_name: 'no-state', online: true, server_day: null, state: null }] };
       return { rows: [] };
     }

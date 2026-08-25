@@ -159,6 +159,12 @@ class ProjectionEngine {
     this.lastClosedUsers = [];
     this.lastTouchedIntervals = [];
     this.lastStableVersion = null;
+    // `lastStableVersion` anchors interval accounting and must only ever move on
+    // a steady projection. `lastVersion` is the newest accepted version of any
+    // completeness and is what realtime reads resolve against, so a repopulating
+    // world after a reset is never answered with the previous day's snapshot.
+    this.lastVersion = null;
+    this.lastWarmingUsers = [];
     this.lastParserCursor = null;
     this.sequence = 0;
   }
@@ -238,17 +244,71 @@ class ProjectionEngine {
     };
     this.versionByKey.set(parseResult.snapshotKey, version);
     this.versions.push(version);
+    this.lastVersion = version;
     observation.parse_status = parseResult.completeness === 'steady' ? 'projected' : 'warming_up';
     if (parseResult.completeness !== 'steady') {
       // A warming-up response may still contain trustworthy rolling message and
-      // drop buffers. Keep those object IDs idempotent, but never let the
-      // incomplete entity set change player state or online intervals.
-      this.projectMessages(parseResult, version, new Map(parseResult.entities.map(entity => [userKey(entity.user_id), entity])), this.currentStates);
+      // drop buffers. Keep those object IDs idempotent, and let the entity set
+      // advance the displayed current state so realtime reads follow the live
+      // world while it repopulates. Online intervals, the daily baseline and the
+      // base/delta chain stay steady-driven: an incomplete set must never close
+      // an interval or anchor history.
+      const entitiesByUser = new Map(parseResult.entities.map(entity => [userKey(entity.user_id), entity]));
+      const previousStates = this.projectWarmingState(parseResult, version);
+      this.projectMessages(parseResult, version, entitiesByUser, previousStates);
       this.projectDrops(parseResult, version, false);
       return { observation, parsed: parseResult, version, status: 'warming_up' };
     }
     this.projectStableVersion(parseResult, version);
     return { observation, parsed: parseResult, version, status: 'projected' };
+  }
+
+  // Display-only projection for an incomplete entity set. `players` and
+  // `player_state_current` are what the realtime views render, so they follow
+  // the newest snapshot even while the world is still filling up after a reset.
+  // Everything that accounts for time or anchors history is deliberately left
+  // alone: no interval is opened or closed, no daily stat or quota moves, and no
+  // base/delta row is written. Returns the pre-update states so kill evidence is
+  // still resolved against the state that preceded this snapshot.
+  projectWarmingState(parsed, version) {
+    const previousStates = new Map(this.currentStates);
+    this.lastWarmingUsers = [];
+    for (const entity of parsed.entities) {
+      const uid = userKey(entity.user_id);
+      if (!uid) continue;
+      const previousState = previousStates.get(uid);
+      const segmentId = previousState?.segment_id || `segment-${parsed.snapshotId}-${uid}`;
+      const player = this.players.get(uid) || {
+        user_id: entity.user_id,
+        first_seen_at: version.observed_at,
+        current_name: entity.name || '',
+        current_entity_id: entity.entity_id,
+        online: true
+      };
+      player.last_seen_at = version.observed_at;
+      player.current_name = entity.name || player.current_name || '';
+      player.current_entity_id = entity.entity_id;
+      player.online = true;
+      player.last_snapshot_id = parsed.snapshotId;
+      player.segment_id = segmentId;
+      this.players.set(uid, player);
+      // `from_warming` makes the next steady projection open a fresh segment and
+      // write a full base row, so the delta chain is never diffed against a
+      // state that was never persisted as a base or a delta.
+      this.currentStates.set(uid, {
+        ...entity,
+        snapshot_id: parsed.snapshotId,
+        observed_at: version.observed_at,
+        server_day: parsed.serverDay,
+        reset_generation: parsed.resetGeneration,
+        entity_id: entity.entity_id,
+        segment_id: segmentId,
+        online: true,
+        from_warming: true
+      });
+      this.lastWarmingUsers.push(entity.user_id);
+    }
+    return previousStates;
   }
 
   projectStableVersion(parsed, version) {
@@ -283,7 +343,7 @@ class ProjectionEngine {
     for (const entity of parsed.entities) {
       const uid = userKey(entity.user_id);
       const previousState = previousStates.get(uid);
-      const continuous = Boolean(previousState && this.lastStableUsers.has(uid) && !dayChanged && !generationChanged && previousState.entity_id === entity.entity_id && previousState.segment_id);
+      const continuous = Boolean(previousState && !previousState.from_warming && this.lastStableUsers.has(uid) && !dayChanged && !generationChanged && previousState.entity_id === entity.entity_id && previousState.segment_id);
       const segmentId = continuous ? previousState.segment_id : `segment-${parsed.snapshotId}-${uid}`;
       if (continuous) sameSegment.add(uid);
       const state = { ...entity, snapshot_id: parsed.snapshotId, observed_at: version.observed_at, server_day: parsed.serverDay, reset_generation: parsed.resetGeneration, entity_id: entity.entity_id, segment_id: segmentId, online: true };
@@ -636,16 +696,24 @@ class ProjectionEngine {
     }
   }
 
+  // Realtime reads resolve against the newest accepted version, warming-up
+  // included. Falling back to the last steady version would answer "what is
+  // happening now" with the previous day once the world resets at midnight.
   getLatestVersion() {
+    const latest = this.lastVersion || this.lastStableVersion;
+    return latest ? cloneJson(latest) : null;
+  }
+
+  getLatestStableVersion() {
     return this.lastStableVersion ? cloneJson(this.lastStableVersion) : null;
   }
 
   getVersionToken() {
-    return this.lastStableVersion?.version_token || null;
+    return this.getLatestVersion()?.version_token || null;
   }
 
   getAvailableDates() {
-    return Array.from(new Set(this.versions.filter(version => version.completeness === 'steady').map(version => version.server_day))).sort();
+    return Array.from(new Set(this.versions.map(version => version.server_day))).sort();
   }
 
   getMeta() {
@@ -959,6 +1027,9 @@ class ProjectionEngine {
     const rebuilt = this.rebuildCurrentAt();
     const mismatches = [];
     for (const [uid, state] of this.currentStates) {
+      // Warming-up states are display-only and deliberately never written to the
+      // base/delta chain, so they are not rebuildable by construction.
+      if (state.from_warming) continue;
       const copy = { ...state };
       delete copy.online;
       delete copy.observed_at;
@@ -980,7 +1051,10 @@ class ProjectionEngine {
   }
 
   health() {
-    const latest = this.lastStableVersion;
+    // Staleness measures whether ingestion is still advancing, so it tracks the
+    // newest version. Gating it on steadiness turned every world reset into a
+    // false "stale" alarm for as long as the world took to repopulate.
+    const latest = this.lastVersion || this.lastStableVersion;
     const now = Date.now();
     return {
       latestStableVersionAgeMs: latest ? Math.max(0, now - Date.parse(latest.observed_at)) : null,

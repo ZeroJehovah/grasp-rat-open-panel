@@ -61,7 +61,7 @@ export async function getMeta(signal?: AbortSignal): Promise<MetaResponse> {
   return getJson<MetaResponse>('/api/v1/meta', signal);
 }
 
-export async function getVersion(signal?: AbortSignal): Promise<{ versionToken: string | null; snapshotId: string | null; observedAt: string | null; serverDay?: string | null }> {
+export async function getVersion(signal?: AbortSignal): Promise<{ versionToken: string | null; snapshotId: string | null; observedAt: string | null; serverDay?: string | null; completeness?: string | null; warmingUp?: boolean; entityCount?: number | null }> {
   return getJson('/api/v1/realtime/version', signal);
 }
 
