@@ -161,6 +161,22 @@ test('map camera exposes axes, viewport readout and player details', async ({ pa
   await expect(page.getByRole('button', { name: '缩小地图' })).toBeVisible();
 });
 
+test('map orientation and list direction follow the game axis where larger y is lower', async ({ page }) => {
+  const southEast = { ...player, state: { ...player.state, x: 400, y: 300 } };
+  await mockApi(page, [southEast]);
+  await page.goto('/realtime/map');
+  const geometry = await page.locator('.map-canvas').evaluate(element => {
+    const stage = element.getBoundingClientRect();
+    const dot = element.querySelector('.player-dot')?.getBoundingClientRect();
+    if (!dot) throw new Error('map has no player dot to measure');
+    return { centerX: stage.left + stage.width / 2, centerY: stage.top + stage.height / 2, dotX: dot.left + dot.width / 2, dotY: dot.top + dot.height / 2 };
+  });
+  expect(geometry.dotX).toBeGreaterThan(geometry.centerX);
+  expect(geometry.dotY).toBeGreaterThan(geometry.centerY);
+  await page.goto('/realtime/players');
+  await expect(page.locator('.direction-cell').first()).toHaveText('东南 · 500米');
+});
+
 test('dragging the map does not select map labels', async ({ page }) => {
   await mockApi(page);
   await page.goto('/realtime/map');
