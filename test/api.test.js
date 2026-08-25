@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 const { ProjectionEngine } = require('../domain/projector');
@@ -282,6 +284,11 @@ function fixture() {
   const oversized = await oversizedApp.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22' });
   assert.strictEqual(oversized.statusCode, 413);
   assert.strictEqual(oversized.json().error, 'history_result_limit');
+  assert.strictEqual(oversized.headers['cache-control'], 'no-store');
+  // 错误响应必须 no-store：共享缓存把一次 400/416 钉在一个正常 URL 上，后面的请求就全废了。
+  const badRange = await oversizedApp.inject({ method: 'GET', url: '/api/v1/history?from=nope&to=2026-08-22' });
+  assert.strictEqual(badRange.statusCode, 400);
+  assert.strictEqual(badRange.headers['cache-control'], 'no-store');
   await oversizedApp.close();
   const gapApp = await buildServer({ store: {
     getMeta: async () => ({ earliestDate: '2026-08-21', latestDate: '2026-08-23', availableDates: ['2026-08-21', '2026-08-23'] }),
@@ -289,6 +296,31 @@ function fixture() {
   } });
   const gap = await gapApp.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-21&to=2026-08-23' });
   assert.strictEqual(gap.statusCode, 416);
+  assert.strictEqual(gap.headers['cache-control'], 'no-store');
   await gapApp.close();
+
+  // 静态资源：assets/ 下带内容哈希的产物按不变对象缓存，index.html 必须每次回源，
+  // 其余没有哈希的根文件取一个折中的 TTL。
+  const distDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'panel-dist-'));
+  fs.mkdirSync(path.join(distDirectory, 'assets'));
+  fs.writeFileSync(path.join(distDirectory, 'assets', 'index-B_SFExSR.js'), 'console.log(1);');
+  fs.writeFileSync(path.join(distDirectory, 'assets', 'unhashed.svg'), '<svg/>');
+  fs.writeFileSync(path.join(distDirectory, 'index.html'), '<!doctype html><title>panel</title>');
+  fs.writeFileSync(path.join(distDirectory, 'favicon.svg'), '<svg/>');
+  const distApp = await buildServer({ store, staticDirectory: distDirectory, requireStatic: true });
+  const hashedAsset = await distApp.inject({ method: 'GET', url: '/assets/index-B_SFExSR.js' });
+  assert.strictEqual(hashedAsset.statusCode, 200);
+  assert.strictEqual(hashedAsset.headers['cache-control'], 'public, max-age=31536000, immutable');
+  const indexHtml = await distApp.inject({ method: 'GET', url: '/index.html' });
+  assert.strictEqual(indexHtml.headers['cache-control'], 'no-cache');
+  const spaFallback = await distApp.inject({ method: 'GET', url: '/history/players' });
+  assert.strictEqual(spaFallback.statusCode, 200);
+  assert.strictEqual(spaFallback.headers['cache-control'], 'no-cache', 'SPA 回退发的也是 index.html');
+  const favicon = await distApp.inject({ method: 'GET', url: '/favicon.svg' });
+  assert.strictEqual(favicon.headers['cache-control'], 'public, max-age=3600');
+  const unhashed = await distApp.inject({ method: 'GET', url: '/assets/unhashed.svg' });
+  assert.strictEqual(unhashed.headers['cache-control'], 'public, max-age=3600', 'assets/ 下没有哈希的文件不能当不变对象');
+  await distApp.close();
+  fs.rmSync(distDirectory, { recursive: true, force: true });
   console.log('api tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

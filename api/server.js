@@ -27,17 +27,36 @@ const HISTORY_OPEN_CACHE_CONTROL = 'public, max-age=5, s-maxage=10, stale-while-
 const HISTORY_CLOSED_CACHE_CONTROL = 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400';
 
 // 压缩本来由 @fastify/compress 每次请求现做，1.1 MB 的响应体单这一步就要三十多毫秒，
-// 比命中缓存后剩下的所有工作都贵。这里自己协商编码并把压缩结果缓存下来，参数刻意和
-// 插件对齐（阈值 1024、brotli quality 4），这样客户端拿到的字节和之前一致。
+// 比命中缓存后剩下的所有工作都贵。这里自己协商编码并把压缩结果缓存下来。
 // 一旦设了 Content-Encoding，插件的 onSend 会直接放行，不会二次压缩。
+//
+// 压缩结果进了缓存之后，压缩成本按条目摊销、传输字节却是按请求算的，所以质量取 5 而不是
+// 沿用插件的 4：同一份 1.1 MB 击杀响应 q4 是 118,095 字节约 14 ms，q5 是 106,600 字节约
+// 19 ms（小 9.7%，多 5 ms 且只付一次），再往上 q6/q7 只多省 0.5% 却越来越慢，q11 要 2.7 秒
+// ——同步压缩绝不能碰。阈值仍与插件保持一致（1024），未命中的路径由插件按 q4 处理。
 const COMPRESSION_ENCODINGS = Object.freeze(['br', 'gzip']);
 const COMPRESSION_THRESHOLD = 1024;
-const BROTLI_OPTIONS = { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } };
+const BROTLI_OPTIONS = { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } };
 
 function compressBody(encoding, body) {
   if (encoding === 'br') return zlib.brotliCompressSync(body, BROTLI_OPTIONS);
   if (encoding === 'gzip') return zlib.gzipSync(body);
   return null;
+}
+
+// Vite 把 assets/ 下的产物都带上内容哈希，文件名变了内容才会变，所以可以按不变对象缓存。
+// 不这么声明的代价是实测出来的：fastify-static 默认发 `public, max-age=0`，Cloudflare 边缘
+// 虽然存了副本，每个请求还要穿 tunnel 回源验一次（cf-cache-status: REVALIDATED），源站还要
+// 把 190 KB 的 JS 重新压一遍。index.html 必须继续每次回源，否则发布新版本后客户端会一直
+// 拿着旧的 asset 引用。
+const IMMUTABLE_ASSET = /[/\\]assets[/\\][^/\\]+-[A-Za-z0-9_-]{8,}\.[^/\\.]+$/;
+
+// @fastify/static v10 把 fastify 的 reply 传进来（不是 raw response），而且这个钩子在它自己
+// 设完默认头之后才调用，所以这里直接覆盖 Cache-Control 就够了。
+function setStaticHeaders(reply, filePath) {
+  if (IMMUTABLE_ASSET.test(filePath)) return reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+  if (/\.html?$/i.test(filePath)) return reply.header('Cache-Control', 'no-cache');
+  reply.header('Cache-Control', 'public, max-age=3600');
 }
 
 function etagFor(payload) {
@@ -229,13 +248,13 @@ async function buildServer(options = {}) {
     try {
       range = businessDateRange(from, to);
     } catch (error) {
-      reply.code(400).send({ error: 'invalid_date_range', message: error.message, ...(resource ? { resource } : {}), generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
+      reply.code(400).header('Cache-Control', 'no-store').send({ error: 'invalid_date_range', message: error.message, ...(resource ? { resource } : {}), generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
       return null;
     }
     const meta = await metaOf();
     const availableDates = Array.isArray(meta.availableDates) ? meta.availableDates : null;
     if (meta.earliestDate && range.from < meta.earliestDate || meta.latestDate && range.to > meta.latestDate || availableDates && !isDateRangeCovered(range, availableDates)) {
-      reply.code(416).send({ error: 'date_range_unavailable', ...(resource ? { resource } : {}), earliestDate: meta.earliestDate, latestDate: meta.latestDate, generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
+      reply.code(416).header('Cache-Control', 'no-store').send({ error: 'date_range_unavailable', ...(resource ? { resource } : {}), earliestDate: meta.earliestDate, latestDate: meta.latestDate, generatedAt: new Date().toISOString(), timezone: BUSINESS_TIMEZONE, schemaVersion: SCHEMA_VERSION });
       return null;
     }
     const latest = await latestVersionOf(store);
@@ -312,7 +331,7 @@ async function buildServer(options = {}) {
   if (options.staticDirectory) {
     try {
       const fastifyStatic = require('@fastify/static');
-      await app.register(fastifyStatic, { root: path.resolve(options.staticDirectory), prefix: '/', wildcard: true });
+      await app.register(fastifyStatic, { root: path.resolve(options.staticDirectory), prefix: '/', wildcard: true, setHeaders: setStaticHeaders });
       app.setNotFoundHandler((request, reply) => {
         if (request.method === 'GET' && !request.url.startsWith('/api/')) return reply.sendFile('index.html');
         return reply.code(404).send({ error: 'not_found' });
