@@ -120,7 +120,6 @@ h2 { margin: 0; font-size: 14px; letter-spacing: -.02em; }
 .chat-row p { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .chat-row strong { margin-right: 5px; color: var(--green); font-weight: 700; }
 .chat-row.kill p { color: var(--red); }
-.chat-row.kill-summary { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 10px; }
 .empty-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 80px; color: var(--muted); font-size: 11px; }
 .drop-threshold-control { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .drop-threshold-slider { width: clamp(110px, 15vw, 180px); min-width: 100px; height: 16px; margin: 0; padding: 0; border: 0; color: var(--accent); background: transparent; accent-color: var(--accent); cursor: ew-resize; }

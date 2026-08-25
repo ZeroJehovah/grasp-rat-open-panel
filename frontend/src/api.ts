@@ -10,6 +10,7 @@ export interface HistoryPageQuery {
   page?: number | 'last' | null;
   minDrop?: number | null;
   users?: number[] | null;
+  onlyChat?: boolean | null;
 }
 
 interface ConditionalEntry {
@@ -76,6 +77,8 @@ export function historyQuerySuffix(page?: HistoryPageQuery | null): string {
   if (page.page) params.push(`page=${page.page}`);
   if (page.minDrop !== null && page.minDrop !== undefined) params.push(`minDrop=${page.minDrop}`);
   if (page.users && page.users.length > 0) params.push(`users=${page.users.slice().sort((left, right) => left - right).join(',')}`);
+  // 关闭状态不带参数：默认值不该在缓存里多占一条与不带参数完全同内容的条目。
+  if (page.onlyChat) params.push('onlyChat=1');
   return params.length === 0 ? '' : `&${params.join('&')}`;
 }
 

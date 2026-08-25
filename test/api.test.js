@@ -338,7 +338,8 @@ function fixture() {
   await nullStateApp.close();
 
   // 历史分页：过滤和裁剪在路由层做，store 仍然返回整个区间。
-  const pageMessages = Array.from({ length: 250 }, (_, index) => ({ message_id: `m${index}`, event_at: `2026-08-20T00:00:${String(index % 60).padStart(2, '0')}Z` }));
+  // 每 5 条里 1 条聊天、4 条击杀播报：这正是"仅看聊天"要解决的比例问题。
+  const pageMessages = Array.from({ length: 250 }, (_, index) => ({ message_id: `m${index}`, kind: index % 5 === 0 ? 'chat' : 'kill', event_at: `2026-08-20T00:00:${String(index % 60).padStart(2, '0')}Z` }));
   const pageKills = Array.from({ length: 12 }, (_, index) => ({
     kill_id: `k${index}`,
     event_at: `2026-08-20T00:00:${String(index).padStart(2, '0')}Z`,
@@ -375,7 +376,13 @@ function fixture() {
   assert.notStrictEqual(pageTwo.headers.etag, firstPage.headers.etag, '不同页必须有不同的 ETag');
   assert.strictEqual(pageTwo.headers['x-panel-cache'], 'miss');
   assert.strictEqual((await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&page=2` })).headers['x-panel-cache'], 'hit');
-  for (const bad of ['pageSize=250', 'pageSize=100&page=0', 'pageSize=100&page=x', 'page=2', 'minDrop=1']) {
+  const onlyChat = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&onlyChat=1` });
+  assert.deepStrictEqual(onlyChat.json().pagination, { page: 1, pageSize: 100, total: 50, totalPages: 1, hasPrev: false, hasNext: false }, '仅看聊天必须按过滤后的条数分页');
+  assert.ok(onlyChat.json().messages.every(message => message.kind === 'chat'), '仅看聊天只排除击杀播报');
+  assert.notStrictEqual(onlyChat.headers.etag, firstPage.headers.etag, '过滤条件进缓存键');
+  const onlyChatOff = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&onlyChat=0` });
+  assert.strictEqual(onlyChatOff.json().pagination.total, 250, 'onlyChat=0 等于不过滤');
+  for (const bad of ['pageSize=250', 'pageSize=100&page=0', 'pageSize=100&page=x', 'page=2', 'minDrop=1', 'onlyChat=yes']) {
     const response = await pageApp.inject({ method: 'GET', url: `${chatBase}&${bad}` });
     assert.strictEqual(response.statusCode, 400, `${bad} 必须被拒绝`);
     assert.strictEqual(response.json().error, 'invalid_pagination');
@@ -397,9 +404,11 @@ function fixture() {
   const filterOnly = await pageApp.inject({ method: 'GET', url: `${killsBase}&minDrop=500` });
   assert.strictEqual(filterOnly.json().kills.length, 6, '只给过滤条件不给页大小时仍然返回全部命中行');
   assert.strictEqual(filterOnly.json().pagination, undefined);
+  const killsOnlyChat = await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&onlyChat=1` });
+  assert.strictEqual(killsOnlyChat.statusCode, 400, 'onlyChat 只对聊天有意义');
   const orderedUsers = await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&users=12,11` });
   assert.strictEqual(orderedUsers.headers.etag, (await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&users=11,12` })).headers.etag, 'users 顺序不同不能各占一条缓存');
-  for (const bad of ['pageSize=100', 'minDrop=1', 'users=1'].map(query => `/api/v1/history/players?from=2026-08-20&to=2026-08-20&${query}`).concat(['/api/v1/history?from=2026-08-20&to=2026-08-20&pageSize=100'])) {
+  for (const bad of ['pageSize=100', 'minDrop=1', 'users=1', 'onlyChat=1'].map(query => `/api/v1/history/players?from=2026-08-20&to=2026-08-20&${query}`).concat(['/api/v1/history?from=2026-08-20&to=2026-08-20&pageSize=100', '/api/v1/history?from=2026-08-20&to=2026-08-20&onlyChat=1'])) {
     const response = await pageApp.inject({ method: 'GET', url: bad });
     assert.strictEqual(response.statusCode, 400, `${bad} 必须被拒绝`);
     assert.strictEqual(response.json().error, 'invalid_pagination');

@@ -9,7 +9,8 @@ const HISTORY_PAGE_SIZES = Object.freeze([100, 500, 1000]);
 const HISTORY_PAGE_ROW_CAP = 200_000;
 const HISTORY_USER_FILTER_MAX = 64;
 const PAGINATED_RESOURCES = Object.freeze(['chat', 'kills']);
-const FILTERABLE_RESOURCES = Object.freeze(['kills']);
+// 每个过滤参数只对一种资源有意义；用在别的资源上要报错而不是静默忽略。
+const FILTER_RESOURCES = Object.freeze({ minDrop: 'kills', users: 'kills', onlyChat: 'chat' });
 const RESOURCE_ROWS = Object.freeze({ chat: 'messages', kills: 'kills' });
 
 function invalidPagination(message) {
@@ -42,17 +43,29 @@ function parseUserIds(raw) {
   return users.length === 0 ? null : users;
 }
 
+function parseBooleanFlag(name, raw) {
+  if (raw === '1' || raw === 'true') return true;
+  if (raw === '0' || raw === 'false') return false;
+  throw invalidPagination(`${name} must be 0 or 1`);
+}
+
 function parseFilters(resource, query) {
-  const minDropRaw = firstValue(query.minDrop);
-  const usersRaw = firstValue(query.users);
-  if (minDropRaw === null && usersRaw === null) return null;
-  if (!FILTERABLE_RESOURCES.includes(resource)) throw invalidPagination(`history ${resource} does not accept minDrop or users`);
+  const raw = { minDrop: firstValue(query.minDrop), users: firstValue(query.users), onlyChat: firstValue(query.onlyChat) };
+  const present = Object.keys(raw).filter(name => raw[name] !== null);
+  if (present.length === 0) return null;
+  for (const name of present) {
+    if (FILTER_RESOURCES[name] !== resource) throw invalidPagination(`history ${resource} does not accept ${name}`);
+  }
   let minDrop = null;
-  if (minDropRaw !== null) {
-    minDrop = Number(minDropRaw);
+  if (raw.minDrop !== null) {
+    minDrop = Number(raw.minDrop);
     if (!Number.isFinite(minDrop) || minDrop < 0) throw invalidPagination('minDrop must be a non-negative number');
   }
-  return { minDrop, users: usersRaw === null ? null : parseUserIds(usersRaw) };
+  return {
+    minDrop,
+    users: raw.users === null ? null : parseUserIds(raw.users),
+    onlyChat: raw.onlyChat === null ? false : parseBooleanFlag('onlyChat', raw.onlyChat)
+  };
 }
 
 // 返回 null 表示这次请求不分页也不过滤，走原来的整区间行为（413 上限照旧生效）。
@@ -84,6 +97,7 @@ function historyPageCacheKey(request) {
   const parts = [`p${request.page}`, `s${request.pageSize ?? 'all'}`];
   if (request.filters?.minDrop !== null && request.filters?.minDrop !== undefined) parts.push(`d${request.filters.minDrop}`);
   if (request.filters?.users) parts.push(`u${request.filters.users.join('.')}`);
+  if (request.filters?.onlyChat) parts.push('c1');
   return `:${parts.join(':')}`;
 }
 
@@ -128,6 +142,13 @@ function applyMinDrop(rows, minDrop) {
   });
 }
 
+// 只排除击杀播报。将来若有别的 kind（系统公告之类），"仅看聊天"应该继续显示它们，
+// 这和改造前前端只折叠 kill 的行为一致。
+function applyOnlyChat(rows, onlyChat) {
+  if (!onlyChat) return rows;
+  return rows.filter(row => String(row?.kind || '').toLowerCase() !== 'kill');
+}
+
 function applyUsers(rows, users) {
   if (!users) return rows;
   const wanted = new Set(users);
@@ -141,8 +162,10 @@ function sliceHistoryPage(resource, payload, request) {
   const key = RESOURCE_ROWS[resource];
   if (!key) return payload;
   const rows = Array.isArray(payload[key]) ? payload[key] : [];
-  const thresholdRows = resource === 'kills' ? applyMinDrop(rows, request.filters?.minDrop) : rows;
-  const filtered = resource === 'kills' ? applyUsers(thresholdRows, request.filters?.users) : thresholdRows;
+  const kills = resource === 'kills';
+  // 击杀先按阈值过滤（玩家候选表要以阈值过滤后的结果为准），再按玩家过滤；聊天只有"仅看聊天"一档。
+  const thresholdRows = kills ? applyMinDrop(rows, request.filters?.minDrop) : applyOnlyChat(rows, request.filters?.onlyChat);
+  const filtered = kills ? applyUsers(thresholdRows, request.filters?.users) : thresholdRows;
   if (request.pageSize === null) return { ...payload, [key]: filtered };
   const total = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / request.pageSize));
@@ -155,7 +178,7 @@ function sliceHistoryPage(resource, payload, request) {
     [key]: filtered.slice(start, start + request.pageSize),
     pagination: { page, pageSize: request.pageSize, total, totalPages, hasPrev: page > 1, hasNext: page < totalPages }
   };
-  if (resource === 'kills') result.filterOptions = { players: buildPlayerOptions(rows, thresholdRows, request.filters?.users) };
+  if (kills) result.filterOptions = { players: buildPlayerOptions(rows, thresholdRows, request.filters?.users) };
   return result;
 }
 
