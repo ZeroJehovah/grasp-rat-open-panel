@@ -676,9 +676,10 @@ class PostgresPanelStore {
       .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin') || a.userId - b.userId);
   }
 
-  async getHistoryResource(resource, range) {
+  // latest 由路由传进来：它为了算缓存键已经查过一次版本，这里没有理由再查一遍。
+  async getHistoryResource(resource, range, latestVersion) {
     if (!this.historyDayFragments) return this.getHistoryResourceDirect(resource, range);
-    const latest = await this.getLatestVersion();
+    const latest = latestVersion || await this.getLatestVersion();
     const latestDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
     const context = { latestDay, token: latest?.version_token || latest?.snapshot_id || null };
     const common = {
@@ -692,9 +693,9 @@ class PostgresPanelStore {
     throw new Error(`unknown history resource: ${resource}`);
   }
 
-  async getHistoryChat(range) { return this.getHistoryResource('chat', range); }
-  async getHistoryPlayers(range) { return this.getHistoryResource('players', range); }
-  async getHistoryKills(range) { return this.getHistoryResource('kills', range); }
+  async getHistoryChat(range, latestVersion) { return this.getHistoryResource('chat', range, latestVersion); }
+  async getHistoryPlayers(range, latestVersion) { return this.getHistoryResource('players', range, latestVersion); }
+  async getHistoryKills(range, latestVersion) { return this.getHistoryResource('kills', range, latestVersion); }
 
   async applyObservation(body, metadata = {}) {
     const result = this.engine.applyObservation(body, metadata);

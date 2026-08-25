@@ -242,7 +242,7 @@ async function buildServer(options = {}) {
     const latestDay = serverDayOf(latest);
     // 已结束的区间不会随版本变化，所以它们共享一条缓存；含今天的区间每个版本一份。
     const closed = Boolean(latestDay && range.to < latestDay);
-    return { range, closed, token: versionTokenOf(latest) };
+    return { range, closed, token: versionTokenOf(latest), latest };
   }
 
   function historyCacheFields(plan, resource) {
@@ -300,7 +300,7 @@ async function buildServer(options = {}) {
         return await respondCached(request, reply, {
           cache,
           ...historyCacheFields(plan, resource),
-          build: async () => envelope(await store[method](plan.range), { scope: 'history', resource, from: plan.range.from, to: plan.range.to })
+          build: async () => envelope(await store[method](plan.range, plan.latest), { scope: 'history', resource, from: plan.range.from, to: plan.range.to })
         });
       } catch (error) {
         if (error?.code === 'history_result_limit') return historyLimitReply(reply, error.resource, error.limit);
