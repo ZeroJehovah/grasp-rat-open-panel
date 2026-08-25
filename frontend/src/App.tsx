@@ -233,9 +233,9 @@ function NavLink({ route, children, className, active }: { route: PanelRoute; ch
 
 function Banner({ theme, onTheme, route }: { theme: 'light' | 'dark'; onTheme: () => void; route: PanelRoute }) {
   return <header className="banner">
-    <div className="brand-lockup"><span className="brand-mark"><Activity size={17} strokeWidth={2.5} /></span><div><p className="eyebrow">OPEN OBSERVATORY / UTC+8</p><h1>Grasp Rat <em>Open Panel</em></h1></div></div>
+    <div className="brand-lockup"><span className="brand-mark"><Activity size={16} strokeWidth={2.5} /></span><h1>Grasp Rat <em>Open Panel</em></h1></div>
     <nav className="scope-nav" aria-label="数据范围">
-      <NavLink route={{ scope: 'realtime', tab: 'chat', from: null, to: null }} active={route.scope === 'realtime'}>实时</NavLink>
+      <NavLink route={{ scope: 'realtime', tab: 'map', from: null, to: null }} active={route.scope === 'realtime'}>实时</NavLink>
       <NavLink route={{ scope: 'history', tab: 'chat', from: route.from, to: route.to }} active={route.scope === 'history'}>历史</NavLink>
     </nav>
     <button className="icon-button" onClick={onTheme} aria-label={theme === 'light' ? '切换暗色模式' : '切换亮色模式'} title={theme === 'light' ? '暗色模式' : '亮色模式'}>{theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}</button>
@@ -273,7 +273,7 @@ function HistoryRangeControls({ meta, route }: { meta: MetaResponse; route: Pane
     navigate({ ...route, scope: 'history', from: next.from || null, to: next.to || null });
   };
   return <section className="history-range panel-block" aria-label="历史时间范围">
-    <div className="range-heading"><div><p className="eyebrow">TIME WINDOW</p><h2>历史范围</h2></div><CalendarDays size={16} /></div>
+    <div className="range-heading"><h2>历史范围</h2><CalendarDays size={16} /></div>
     <div className="range-content"><div className="range-selection"><div className="preset-grid">{HISTORY_PRESETS.map(value => {
       const available = value === 'custom' || Boolean(meta.presetRanges?.[value]);
       const active = value === 'custom' ? customSelected : meta.presetRanges?.[value]?.from === range.from && meta.presetRanges?.[value]?.to === range.to;
@@ -283,8 +283,8 @@ function HistoryRangeControls({ meta, route }: { meta: MetaResponse; route: Pane
 }
 
 const REALTIME_TABS: { tab: RouteTab; label: string; icon: typeof MapIcon }[] = [
-  { tab: 'chat', label: '聊天', icon: Rows3 },
   { tab: 'map', label: '地图', icon: MapIcon },
+  { tab: 'chat', label: '聊天', icon: Rows3 },
   { tab: 'players', label: '玩家', icon: Users },
   { tab: 'kills', label: '击杀', icon: Swords }
 ];
@@ -303,6 +303,13 @@ function TabMenu({ route }: { route: PanelRoute }) {
 }
 
 function EmptyState({ text }: { text: string }) { return <div className="empty-state"><Rows3 size={18} /><span>{text}</span></div>; }
+
+function PanelHead({ title, tooltip, actions }: { title: string; tooltip?: string; actions?: ReactNode }) {
+  return <div className="panel-head">
+    <div className="panel-title"><h2>{title}</h2>{tooltip && <span className="tooltip" tabIndex={0} role="img" aria-label={`${title}显示条件`} data-tooltip={tooltip}><CircleHelp size={14} /></span>}</div>
+    {actions && <div className="panel-actions">{actions}</div>}
+  </div>;
+}
 
 function StatusBar({ meta, query, route }: { meta: MetaResponse; query: ResourceQueryState; route: PanelRoute }) {
   const resourceLabel = route.tab === 'chat' ? '聊天' : route.tab === 'map' ? '地图' : route.tab === 'players' ? '玩家' : '击杀';
@@ -364,13 +371,13 @@ function ChatPanel({ messages }: { messages: Message[] }) {
   }, [messages, onlyChat]);
   const contentKey = rows.map(row => row.kind === 'kill-summary' ? row.key : `${row.key}:${row.message.text}`).join('|');
   const onScroll = useAutoBottom(scrollRef, contentKey, filterVersion);
-  return <section className="chat-page panel-block">
-    <div className="section-heading"><div><p className="eyebrow">{onlyChat ? 'CHAT ONLY' : 'EVENT FEED'}</p><h2>聊天记录</h2></div><label className="switch-label"><input type="checkbox" checked={onlyChat} onChange={event => { const next = event.target.checked; setOnlyChat(next); localStorage.setItem(ONLY_CHAT_KEY, String(next)); setFilterVersion(value => value + 1); }} /><span className="switch" />仅看聊天</label></div>
-    <div className="chat-list" ref={scrollRef} onScroll={onScroll} aria-label="聊天记录滚动区">{rows.length === 0 ? <EmptyState text="这个范围还没有消息" /> : rows.map(row => {
+  return <section className="chat-page tab-panel panel-block">
+    <PanelHead title="聊天记录" actions={<label className="switch-label"><input type="checkbox" checked={onlyChat} onChange={event => { const next = event.target.checked; setOnlyChat(next); localStorage.setItem(ONLY_CHAT_KEY, String(next)); setFilterVersion(value => value + 1); }} /><span className="switch" />仅看聊天</label>} />
+    <div className="panel-body"><div className="chat-list" ref={scrollRef} onScroll={onScroll} aria-label="聊天记录滚动区">{rows.length === 0 ? <EmptyState text="这个范围还没有消息" /> : rows.map(row => {
       if (row.kind === 'kill-summary') return <div className="chat-row kill-summary" key={row.key}><span>{row.count}条击杀记录已折叠</span></div>;
       const isKill = row.message.kind.toLowerCase() === 'kill';
       return <div className={isKill ? 'chat-row kill' : 'chat-row'} key={row.key}><time>{formatTime(row.message.event_at || row.message.eventAt)}</time><p>{!isKill && row.message.user_name && <strong>{row.message.user_name}</strong>}<span>{row.message.text}</span></p></div>;
-    })}</div>
+    })}</div></div>
   </section>;
 }
 
@@ -556,7 +563,7 @@ function MapView({ players, map }: { players: MapPlayer[]; map: MapMetadata }) {
   const zoomIn = () => setZoomAt(camera.zoom * 1.35);
   const zoomOut = () => setZoomAt(camera.zoom / 1.35);
 
-  return <section className="map-panel"><div className="section-heading"><div><p className="eyebrow">STEADY SNAPSHOT / MAP V{map.version}</p><div className="title-with-tooltip"><h2>实时地图</h2><span className="tooltip" tabIndex={0} role="img" aria-label="地图显示条件" data-tooltip={MAP_PLAYER_SELECTION_TOOLTIP}><CircleHelp size={14} /></span></div></div><div className="map-controls"><DropThresholdSlider value={threshold} ariaLabel="地图 Drop 阈值" onChange={updateThreshold} /></div></div><div className="map-stage"><div className="map-canvas" ref={stageRef} onWheel={event => { event.preventDefault(); const point = pointerPosition(event); setZoomAt(camera.zoom * (event.deltaY > 0 ? 0.9 : 1.1), point || undefined); }} onPointerDown={event => { const point = pointerPosition(event); if (!point) return; dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { const point = pointerPosition(event); if (!point) return; setMouseWorld(screenToWorld(point.x, point.y)); if (dragRef.current?.pointerId === event.pointerId && camera.zoom > 1) { const dx = point.x - dragRef.current.x; const dy = point.y - dragRef.current.y; setCamera(current => ({ ...current, center: clampCenter({ x: current.center.x - dx / scale, y: current.center.y - dy / scale }) })); dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; } }} onPointerUp={event => { dragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { dragRef.current = null; }} onPointerLeave={() => { setMouseWorld(null); setHoveredId(null); }} onTouchStart={event => { if (event.touches.length === 2) pinchRef.current = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY); }} onTouchMove={event => { if (event.touches.length !== 2 || pinchRef.current === null) return; event.preventDefault(); const distance = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY); setZoomAt(camera.zoom * distance / pinchRef.current); pinchRef.current = distance; }} onTouchEnd={() => { pinchRef.current = null; }}>
+  return <section className="map-panel tab-panel panel-block"><PanelHead title="实时地图" tooltip={MAP_PLAYER_SELECTION_TOOLTIP} actions={<DropThresholdSlider value={threshold} ariaLabel="地图 Drop 阈值" onChange={updateThreshold} />} /><div className="panel-body"><div className="map-stage"><div className="map-canvas" ref={stageRef} onWheel={event => { event.preventDefault(); const point = pointerPosition(event); setZoomAt(camera.zoom * (event.deltaY > 0 ? 0.9 : 1.1), point || undefined); }} onPointerDown={event => { const point = pointerPosition(event); if (!point) return; dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { const point = pointerPosition(event); if (!point) return; setMouseWorld(screenToWorld(point.x, point.y)); if (dragRef.current?.pointerId === event.pointerId && camera.zoom > 1) { const dx = point.x - dragRef.current.x; const dy = point.y - dragRef.current.y; setCamera(current => ({ ...current, center: clampCenter({ x: current.center.x - dx / scale, y: current.center.y - dy / scale }) })); dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; } }} onPointerUp={event => { dragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { dragRef.current = null; }} onPointerLeave={() => { setMouseWorld(null); setHoveredId(null); }} onTouchStart={event => { if (event.touches.length === 2) pinchRef.current = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY); }} onTouchMove={event => { if (event.touches.length !== 2 || pinchRef.current === null) return; event.preventDefault(); const distance = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY); setZoomAt(camera.zoom * distance / pinchRef.current); pinchRef.current = distance; }} onTouchEnd={() => { pinchRef.current = null; }}>
     <svg viewBox={`0 0 ${size.width} ${size.height}`} role="img" aria-label="实时玩家地图">
       {(() => { const x0Top = worldToScreen(0, map.bounds.minY); const x0Bottom = worldToScreen(0, map.bounds.maxY); const y0Left = worldToScreen(map.bounds.minX, 0); const y0Right = worldToScreen(map.bounds.maxX, 0); const center = worldToScreen(map.center.x, map.center.y); return <><path d={`M${x0Top.x} ${x0Top.y} L${x0Bottom.x} ${x0Bottom.y} M${y0Left.x} ${y0Left.y} L${y0Right.x} ${y0Right.y}`} className="map-axis" /><circle cx={center.x} cy={center.y} r={worldRadius * scale} className="map-center-ring" /><text x={x0Bottom.x + 7} y={x0Bottom.y - 7} className="map-detail">x=0</text><text x={y0Right.x - 28} y={y0Right.y - 8} className="map-detail">y=0</text></>; })()}
       {filtered.map(player => { const state = player.state; if (!state || state.x === null || state.y === null) return null; const point = worldToScreen(state.x, state.y); const color = stateColor(player); const active = player.userId === (selectedId ?? hoveredId); return <Fragment key={player.userId}><g className="map-player" role="button" tabIndex={0} aria-label={`${player.name || player.userId} 玩家详情`} onPointerEnter={() => setHoveredId(player.userId)} onPointerLeave={() => setHoveredId(null)} onClick={event => { event.stopPropagation(); setSelectedId(current => current === player.userId ? null : player.userId); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedId(current => current === player.userId ? null : current); } }}><circle cx={point.x} cy={point.y} r={active ? 9 : 6} className={`player-dot ${color}`} /><circle cx={point.x} cy={point.y} r={active ? 17 : 12} className={`player-ring ${color}`} /><circle cx={point.x} cy={point.y} r="24" className="player-hit" /><title>{player.name || player.userId}</title></g><text x={point.x + 13} y={point.y - 12} className="map-label" pointerEvents="none"><tspan x={point.x + 13} className="map-name">{player.name || player.userId}</tspan><tspan x={point.x + 13} dy="14" className="map-drop">Drop {displayNumber(player.drop)}</tspan></text></Fragment>; })}
@@ -565,7 +572,7 @@ function MapView({ players, map }: { players: MapPlayer[]; map: MapMetadata }) {
     <div className="map-readout"><span>视野半径 {displayNumber(viewRadius)}m</span><span>鼠标坐标 {mouseWorld ? `x ${displayCoordinate(mouseWorld.x)} / y ${displayCoordinate(mouseWorld.y)}` : '--'}</span></div>
     {hovered && <div className="map-player-detail"><strong>{hovered.name || hovered.userId}</strong>{hovered.state?.invulnerableRemainingSecs !== null && hovered.state?.invulnerableRemainingSecs !== undefined && hovered.state.invulnerableRemainingSecs > 0 && <span>无敌 {formatSeconds(hovered.state.invulnerableRemainingSecs)}</span>}<span>HP {displayNumber(hovered.state?.hp)}</span><span>体力 {displayNumber(hovered.state?.stamina5s === null || hovered.state?.stamina5s === undefined ? null : hovered.state.stamina5s / 1000)} / {displayNumber(hovered.state?.stamina1h === null || hovered.state?.stamina1h === undefined ? null : hovered.state.stamina1h / 1000)} / {displayNumber(hovered.state?.stamina1d === null || hovered.state?.stamina1d === undefined ? null : hovered.state.stamina1d / 1000)}</span><span>Drop {displayNumber(hovered.drop)}</span><span>Loss {displayNumber(hovered.state?.loss)}</span><span>坐标 x {displayCoordinate(hovered.state?.x)} / y {displayCoordinate(hovered.state?.y)}</span></div>}
     <div className="map-legend"><span><i className="dot good" />1d 满</span><span><i className="dot light" />1d 不满 / 5s 满</span><span><i className="dot bad" />5s 不满</span><span className="map-count">{filtered.length} 位玩家</span></div>
-  </div></div></section>;
+  </div></div></div></section>;
 }
 
 function killPosition(kill: Kill): { x: number | null; y: number | null } {
@@ -578,11 +585,28 @@ function KillTable({ kills, map }: { kills: Kill[]; map: MapMetadata }) {
   const [selected, setSelected] = useState<number[]>([]);
   const [filterVersion, setFilterVersion] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const names = useMemo(() => Array.from(new Map(kills.flatMap(kill => [[kill.killer_user_id, kill.killer_name], [kill.victim_user_id, kill.victim_name]]).filter(([id]) => id !== null && id !== undefined) as [number, string | null][]).entries()).sort((a, b) => String(a[1] || '').localeCompare(String(b[1] || ''), 'zh-Hans-u-co-pinyin')), [kills]);
-  const filtered = useMemo(() => kills.slice().filter(kill => { const amount = kill.drop?.amount; if (amount === null || amount === undefined || amount < threshold) return false; if (selected.length === 0) return true; return selected.includes(Number(kill.killer_user_id)) || selected.includes(Number(kill.victim_user_id)); }).sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || ''))), [kills, selected, threshold]);
+  const overThreshold = useMemo(() => kills.filter(kill => { const amount = kill.drop?.amount; return amount !== null && amount !== undefined && amount >= threshold; }), [kills, threshold]);
+  const namesById = useMemo(() => new Map(kills.flatMap(kill => [[kill.killer_user_id, kill.killer_name], [kill.victim_user_id, kill.victim_name]]).filter(([id]) => id !== null && id !== undefined) as [number, string | null][]), [kills]);
+  const options = useMemo(() => {
+    const ids = new Set<number>(selected);
+    overThreshold.forEach(kill => [kill.killer_user_id, kill.victim_user_id].forEach(id => { if (id !== null && id !== undefined) ids.add(Number(id)); }));
+    return Array.from(ids, id => [id, namesById.get(id) || null] as [number, string | null]).sort((a, b) => String(a[1] || a[0]).localeCompare(String(b[1] || b[0]), 'zh-Hans-u-co-pinyin'));
+  }, [namesById, overThreshold, selected]);
+  const filtered = useMemo(() => overThreshold.slice().filter(kill => selected.length === 0 || selected.includes(Number(kill.killer_user_id)) || selected.includes(Number(kill.victim_user_id))).sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || ''))), [overThreshold, selected]);
   const onScroll = useAutoBottom(scrollRef, filtered.map(kill => `${kill.kill_id || kill.killId}:${kill.event_at || kill.eventAt}`).join('|'), filterVersion);
   const updateThreshold = (next: number) => { setThreshold(next); localStorage.setItem(KILL_THRESHOLD_KEY, String(next)); setFilterVersion(current => current + 1); };
-  return <section className="kill-page"><div className="filter-bar"><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} /><details><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{names.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(Number(id))} onChange={event => { setSelected(current => event.target.checked ? [...current, Number(id)] : current.filter(value => value !== Number(id))); setFilterVersion(current => current + 1); }} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={() => { setSelected([]); setFilterVersion(current => current + 1); }}><X size={13} />清除</button>}</div><div className="table-shell kill-scroll" ref={scrollRef} onScroll={onScroll} aria-label="击杀表格滚动区"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>置信度</th><th>坐标</th><th>相对中心点</th><th className="numeric-head">掉落</th></tr></thead><tbody>{filtered.length === 0 ? <tr><td colSpan={8}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill); return <tr key={kill.kill_id || kill.killId || index}><td><time>{formatTime(kill.event_at || kill.eventAt)}</time></td><td>{kill.killer_name || '未知'}</td><td>{kill.victim_name || '未知'}</td><td><span className={`kill-type ${type === '活跃' ? 'active' : type === '挂机' ? 'idle' : 'unknown'}`}>{type}</span></td><td><span className={`confidence ${kill.confidence}`}>{kill.confidence || 'unknown'}</span></td><PositionCells x={position.x} y={position.y} map={map} /><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></section>;
+  const toggleSelected = (id: number) => { setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]); setFilterVersion(current => current + 1); };
+  const nameCell = (id: number | null | undefined, name: string | null | undefined) => {
+    const numeric = id === null || id === undefined ? null : Number(id);
+    if (numeric === null || !Number.isFinite(numeric)) return <td>{name || '未知'}</td>;
+    const active = selected.includes(numeric);
+    const label = name || String(numeric);
+    return <td><button type="button" className={active ? 'player-filter-link active' : 'player-filter-link'} onClick={() => toggleSelected(numeric)} title={active ? `取消筛选 ${label}` : `只看 ${label}`}>{label}</button></td>;
+  };
+  return <section className="kill-panel tab-panel panel-block">
+    <PanelHead title="击杀明细" actions={<><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} /><details className="player-filter"><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{options.length === 0 ? <p className="player-options-empty">没有符合阈值的玩家</p> : options.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(id)} onChange={() => toggleSelected(id)} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={() => { setSelected([]); setFilterVersion(current => current + 1); }}><X size={13} />清除</button>}</>} />
+    <div className="panel-body"><div className="table-shell kill-scroll" ref={scrollRef} onScroll={onScroll} aria-label="击杀表格滚动区"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>置信度</th><th>坐标</th><th>相对中心点</th><th className="numeric-head">掉落</th></tr></thead><tbody>{filtered.length === 0 ? <tr><td colSpan={8}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill); return <tr key={kill.kill_id || kill.killId || index}><td><time>{formatTime(kill.event_at || kill.eventAt)}</time></td>{nameCell(kill.killer_user_id, kill.killer_name)}{nameCell(kill.victim_user_id, kill.victim_name)}<td><span className={`kill-type ${type === '活跃' ? 'active' : type === '挂机' ? 'idle' : 'unknown'}`}>{type}</span></td><td><span className={`confidence ${kill.confidence}`}>{kill.confidence || 'unknown'}</span></td><PositionCells x={position.x} y={position.y} map={map} /><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></div>
+  </section>;
 }
 
 function PlayersPanel({ players, map, scope }: { players: Player[]; map: MapMetadata; scope: 'realtime' | 'history' }) {
@@ -593,14 +617,17 @@ function PlayersPanel({ players, map, scope }: { players: Player[]; map: MapMeta
     setOnlyOnline(value);
     localStorage.setItem(ONLY_ONLINE_PLAYERS_KEY, String(value));
   };
-  return <section className="players-panel panel-block"><div className="section-heading"><div><p className="eyebrow">{scope === 'realtime' ? 'CURRENT STATE' : 'RANGE AGGREGATE'}</p><div className="title-with-tooltip"><h2>玩家列表</h2><span className="tooltip" tabIndex={0} role="img" aria-label="玩家列表显示条件" data-tooltip={PLAYER_SELECTION_TOOLTIP}><CircleHelp size={14} /></span></div></div><div className="section-heading-actions">{isRealtime && <label className="switch-label"><input type="checkbox" aria-label="仅看在线" checked={onlyOnline} onChange={event => setOnlyOnlineValue(event.target.checked)} /><span className="switch" />仅看在线</label>}<span className="result-count">{visiblePlayers.length} 位玩家</span></div></div><PlayersTable players={visiblePlayers} map={map} scope={scope} /></section>;
+  return <section className="players-panel tab-panel panel-block">
+    <PanelHead title="玩家列表" tooltip={PLAYER_SELECTION_TOOLTIP} actions={<>{isRealtime && <label className="switch-label"><input type="checkbox" aria-label="仅看在线" checked={onlyOnline} onChange={event => setOnlyOnlineValue(event.target.checked)} /><span className="switch" />仅看在线</label>}<span className="result-count">{visiblePlayers.length} 位玩家</span></>} />
+    <div className="panel-body"><PlayersTable players={visiblePlayers} map={map} scope={scope} /></div>
+  </section>;
 }
 
 function ResourceContent({ route, meta, resource }: { route: PanelRoute; meta: MetaResponse; resource: ResourceResponse }) {
   if (route.tab === 'chat') return <ChatPanel messages={resource.messages || []} />;
   if (route.tab === 'map') return <MapView players={(resource.players || []) as MapPlayer[]} map={resource.map || meta.map} />;
   if (route.tab === 'players') return <PlayersPanel players={(resource.players || []) as Player[]} map={meta.map} scope={route.scope} />;
-  return <section className="kill-panel panel-block"><div className="section-heading kill-heading"><div><p className="eyebrow">{route.scope === 'realtime' ? 'TODAY EVENTS' : 'RANGE EVENTS'}</p><h2>击杀明细</h2></div><span className="result-count">{resource.kills?.length || 0} 条记录</span></div><KillTable kills={resource.kills || []} map={meta.map} /></section>;
+  return <KillTable kills={resource.kills || []} map={meta.map} />;
 }
 
 function Footer() {

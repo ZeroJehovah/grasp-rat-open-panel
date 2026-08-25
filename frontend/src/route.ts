@@ -10,7 +10,7 @@ export interface PanelRoute {
   to: string | null;
 }
 
-const REALTIME_TABS: RouteTab[] = ['chat', 'map', 'players', 'kills'];
+const REALTIME_TABS: RouteTab[] = ['map', 'chat', 'players', 'kills'];
 const HISTORY_TABS: RouteTab[] = ['chat', 'players', 'kills'];
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -20,11 +20,11 @@ function validDate(value: string | null): value is string {
 
 export function parseRoute(location: Pick<Location, 'pathname' | 'search'> = window.location): PanelRoute {
   const match = /^\/(realtime|history)\/([a-z]+)$/.exec(location.pathname);
-  if (!match) return { scope: 'realtime', tab: 'chat', from: null, to: null };
+  if (!match) return { scope: 'realtime', tab: 'map', from: null, to: null };
   const scope = match[1] as RouteScope;
   const tab = match[2] as RouteTab;
   const allowed = scope === 'realtime' ? REALTIME_TABS : HISTORY_TABS;
-  if (!allowed.includes(tab)) return { scope: 'realtime', tab: 'chat', from: null, to: null };
+  if (!allowed.includes(tab)) return { scope: 'realtime', tab: 'map', from: null, to: null };
   const query = new URLSearchParams(location.search);
   if (scope === 'realtime') return { scope, tab, from: null, to: null };
   const from = validDate(query.get('from')) ? query.get('from') : null;

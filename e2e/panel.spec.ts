@@ -31,12 +31,12 @@ function screenshotPath(testInfo: { project: { name: string }; title: string }):
   return `test-results/panel-${testInfo.project.name}-${safeTitle}.png`;
 }
 
-test('desktop fixed shell starts at realtime chat and keeps the footer visible', async ({ page }, testInfo) => {
+test('desktop fixed shell starts at the realtime map and keeps the footer visible', async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto('/');
-  await expect(page).toHaveURL(/\/realtime\/chat$/);
-  await expect(page.getByRole('heading', { name: '聊天记录' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: '地图' })).toBeVisible();
+  await expect(page).toHaveURL(/\/realtime\/map$/);
+  await expect(page.getByRole('heading', { name: '实时地图' })).toBeVisible();
+  await expect(page.locator('.tab-menu .tab').first()).toHaveText('地图');
   await page.getByRole('tab', { name: '玩家' }).click();
   await expect(page).toHaveURL(/\/realtime\/players$/);
   await expect(page.getByText('fixture-player')).toBeVisible();
@@ -68,7 +68,7 @@ test('player and kill titles stay fixed while data panes scroll', async ({ page 
 
   await page.goto('/realtime/players');
   const playerPane = page.locator('.players-panel .table-shell');
-  const playerTitle = page.locator('.players-panel .section-heading');
+  const playerTitle = page.locator('.players-panel .panel-head');
   const playerBefore = await playerTitle.boundingBox();
   const playerScroll = await playerPane.evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight }));
   expect(playerScroll.scrollHeight).toBeGreaterThan(playerScroll.height);
@@ -79,7 +79,7 @@ test('player and kill titles stay fixed while data panes scroll', async ({ page 
   await page.getByRole('tab', { name: '击杀' }).click();
   await expect(page.locator('.kill-table tbody td').filter({ hasText: 'victim-0' })).toBeVisible();
   const killPane = page.locator('.kill-panel .kill-scroll');
-  const killTitle = page.locator('.kill-panel .kill-heading');
+  const killTitle = page.locator('.kill-panel .panel-head');
   const killBefore = await killTitle.boundingBox();
   const killScroll = await killPane.evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight }));
   expect(killScroll.scrollHeight).toBeGreaterThan(killScroll.height);
@@ -339,4 +339,85 @@ test('realtime player quota uses external balance with three decimals', async ({
   await expect(row.locator('td').nth(4)).toHaveText('2.500');
   await expect(row.locator('.quota-integer')).toHaveText('2');
   await expect(row.locator('.quota-fraction')).toHaveText('.500');
+});
+
+test('panel chrome drops the decorative eyebrow copy', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/map');
+  await expect(page.getByText('OPEN OBSERVATORY / UTC+8')).toHaveCount(0);
+  await expect(page.getByText(/STEADY SNAPSHOT/)).toHaveCount(0);
+  await page.getByRole('tab', { name: '聊天' }).click();
+  await expect(page.getByText('EVENT FEED')).toHaveCount(0);
+  await expect(page.getByText('CHAT ONLY')).toHaveCount(0);
+  await page.getByRole('tab', { name: '玩家' }).click();
+  await expect(page.getByText('CURRENT STATE')).toHaveCount(0);
+  await page.getByRole('tab', { name: '击杀' }).click();
+  await expect(page.getByText('TODAY EVENTS')).toHaveCount(0);
+  await expect(page.getByText(/条记录/)).toHaveCount(0);
+  await page.getByRole('link', { name: '历史' }).click();
+  await expect(page.getByText('TIME WINDOW')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '历史范围' })).toBeVisible();
+});
+
+test('tab panels split into a tinted title strip and a flush content region', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/players');
+  const head = page.locator('.players-panel .panel-head');
+  const body = page.locator('.players-panel .panel-body');
+  const shell = page.locator('.players-panel .table-shell');
+  const bodyBox = await body.boundingBox();
+  const shellBox = await shell.boundingBox();
+  expect(Math.abs((bodyBox?.x || 0) - (shellBox?.x || 0))).toBeLessThanOrEqual(1);
+  expect(Math.abs((bodyBox?.y || 0) - (shellBox?.y || 0))).toBeLessThanOrEqual(1);
+  expect(Math.abs((bodyBox?.width || 0) - (shellBox?.width || 0))).toBeLessThanOrEqual(1);
+  expect(Math.abs((bodyBox?.height || 0) - (shellBox?.height || 0))).toBeLessThanOrEqual(1);
+  const headBackground = await head.evaluate(element => getComputedStyle(element).backgroundColor);
+  const bodyBackground = await body.evaluate(element => getComputedStyle(element).backgroundColor);
+  expect(headBackground).not.toBe(bodyBackground);
+  await page.goto('/realtime/map');
+  await expect(page.locator('.map-panel')).toHaveCSS('border-top-width', '1px');
+  expect(await page.locator('.map-panel .panel-body').evaluate(element => getComputedStyle(element).backgroundColor)).not.toBe(await page.locator('body').evaluate(element => getComputedStyle(element).backgroundColor));
+});
+
+test('kill player filter lists only players above the Drop threshold', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/api/v1/realtime/kills*', route => route.fulfill({ json: response('realtime', 'kills', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, kills: [
+    { kill_id: 'small-kill', event_at: '2026-08-23T00:02:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'fixture-player', victim_name: 'small-victim', confidence: 'confirmed', drop: { amount: 8 }, victim_position: { x: 1, y: 2 } },
+    { kill_id: 'large-kill', event_at: '2026-08-23T00:03:00+08:00', killer_user_id: 7, victim_user_id: 9, killer_name: 'fixture-player', victim_name: 'large-victim', confidence: 'confirmed', drop: { amount: 32 }, victim_position: { x: 3, y: 4 } }
+  ] }) }));
+  await page.goto('/realtime/kills');
+  await page.locator('.kill-panel .panel-head .player-filter summary').click();
+  await expect(page.locator('.player-options label')).toHaveText(['fixture-player', 'large-victim']);
+  await page.getByRole('slider', { name: '击杀 Drop 阈值' }).press('Home');
+  await expect(page.locator('.player-options label')).toHaveText(['fixture-player', 'large-victim', 'small-victim']);
+});
+
+test('kill rows filter when a killer or victim name is clicked', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/api/v1/realtime/kills*', route => route.fulfill({ json: response('realtime', 'kills', { versionToken: 'v1', latest: { snapshot_id: 's1', server_day: '2026-08-23', server_tick: 10, observed_at: player.state.observedAt }, kills: [
+    { kill_id: 'k1', event_at: '2026-08-23T00:01:00+08:00', killer_user_id: 7, victim_user_id: 8, killer_name: 'fixture-player', victim_name: 'alpha', confidence: 'confirmed', drop: { amount: 32 }, victim_position: { x: 1, y: 2 } },
+    { kill_id: 'k2', event_at: '2026-08-23T00:02:00+08:00', killer_user_id: 9, victim_user_id: 10, killer_name: 'beta', victim_name: 'gamma', confidence: 'confirmed', drop: { amount: 40 }, victim_position: { x: 3, y: 4 } },
+    { kill_id: 'k3', event_at: '2026-08-23T00:03:00+08:00', killer_user_id: 7, victim_user_id: 10, killer_name: 'fixture-player', victim_name: 'gamma', confidence: 'confirmed', drop: { amount: 50 }, victim_position: { x: 5, y: 6 } }
+  ] }) }));
+  await page.goto('/realtime/kills');
+  const rows = page.locator('.kill-table tbody tr');
+  await expect(rows).toHaveCount(3);
+  await page.locator('.kill-table tbody .player-filter-link').filter({ hasText: 'alpha' }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(page.locator('.player-filter summary')).toContainText('玩家筛选 · 1');
+  await page.locator('.kill-table tbody .player-filter-link.active').click();
+  await expect(rows).toHaveCount(3);
+  await page.locator('.kill-table tbody .player-filter-link').filter({ hasText: 'beta' }).first().click();
+  await expect(rows).toHaveCount(1);
+  await page.getByRole('button', { name: '清除' }).click();
+  await expect(rows).toHaveCount(3);
+});
+
+test('the page serves the banner mark as its favicon', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/realtime/map');
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/favicon.svg');
+  const icon = await page.request.get('/favicon.svg');
+  expect(icon.status()).toBe(200);
+  expect(await icon.text()).toContain('#e85e3f');
 });
