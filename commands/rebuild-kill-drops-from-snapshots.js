@@ -88,7 +88,13 @@ function replay(options) {
   }
   const kills = Array.from(engine.kills.values()).filter(kill => wanted.has(kill.local_date));
   const drops = Array.from(engine.drops.values()).filter(drop => wanted.has(drop.server_day) && drop.kill_event_id);
-  return { kills, drops, summary: { files: window.length, leadInFrames: Math.min(options.leadInFrames, firstWanted), firstObservedAt: window[0]?.observedAt || null, lastObservedAt: window.at(-1)?.observedAt || null } };
+  // A snapshot id hashes `serverDay/resetGeneration/tick/payloadHash`, and the
+  // generation counter is relative to where the replay started — so the ids this
+  // engine mints are internally consistent but are NOT the ids the live pipeline
+  // stored. `observed_at` comes from the raw file name and is identical in both,
+  // so it is what the replayed ids get resolved through before they are written.
+  const observedAtById = new Map(engine.versions.map(version => [version.snapshot_id, version.observed_at]));
+  return { kills, drops, observedAtById, summary: { files: window.length, leadInFrames: Math.min(options.leadInFrames, firstWanted), firstObservedAt: window[0]?.observedAt || null, lastObservedAt: window.at(-1)?.observedAt || null } };
 }
 
 function sameJson(before, after) {
@@ -108,12 +114,29 @@ async function main() {
     return;
   }
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-  const { kills, drops, summary } = replay(options);
+  const { kills, drops, observedAtById, summary } = replay(options);
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
-    const changes = { kills: kills.length, killsUpdated: 0, killsUnchanged: 0, killsMissingRow: 0, killsWithoutEvidence: 0, dropsLinked: 0, dropsAlreadyLinked: 0 };
+    const changes = { kills: kills.length, killsUpdated: 0, killsUnchanged: 0, killsMissingRow: 0, killsWithoutEvidence: 0, evidenceIdsUnresolved: 0, dropsLinked: 0, dropsAlreadyLinked: 0 };
     const samples = [];
+    const resolved = new Map();
+    // Written ids have to exist in snapshot_versions, so a replayed id is
+    // translated through its observation time. An id that cannot be resolved
+    // becomes null and COALESCE keeps whatever the row already carried.
+    const resolveSnapshotId = async replayId => {
+      if (!replayId) return null;
+      if (resolved.has(replayId)) return resolved.get(replayId);
+      const observedAt = observedAtById.get(replayId) || null;
+      let stored = null;
+      if (observedAt) {
+        const found = await client.query('SELECT snapshot_id FROM snapshot_versions WHERE observed_at = $1::timestamptz', [observedAt]);
+        if (found.rowCount === 1) stored = found.rows[0].snapshot_id;
+      }
+      if (!stored) changes.evidenceIdsUnresolved += 1;
+      resolved.set(replayId, stored);
+      return stored;
+    };
     await client.query('BEGIN');
     for (const kill of kills) {
       if (kill.drop === null || kill.drop.amount === null || kill.drop.amount === undefined) changes.killsWithoutEvidence += 1;
@@ -130,6 +153,10 @@ async function main() {
       changes.killsUpdated += 1;
       if (samples.length < 8) samples.push({ killId: kill.kill_id, tick: kill.tick, dropBefore: before.drop === null ? null : before.drop.amount, dropAfter: kill.drop === null ? null : kill.drop.amount });
       if (options.dryRun) continue;
+      const evidenceSnapshotId = await resolveSnapshotId(kill.evidence_snapshot_id);
+      const dropJson = kill.drop === null
+        ? null
+        : JSON.stringify({ ...kill.drop, evidence_snapshot_id: await resolveSnapshotId(kill.drop.evidence_snapshot_id) });
       // COALESCE keeps a stored value the replay could not derive. This command
       // repairs wrong evidence; it never erases evidence.
       await client.query(`UPDATE kill_events SET
@@ -142,8 +169,8 @@ async function main() {
         WHERE local_date = $1::date AND kill_id = $2`, [
         kill.local_date,
         kill.kill_id,
-        kill.drop === null ? null : JSON.stringify(kill.drop),
-        kill.evidence_snapshot_id,
+        dropJson,
+        evidenceSnapshotId,
         kill.victim_position === null ? null : JSON.stringify(kill.victim_position),
         kill.killer_position === null ? null : JSON.stringify(kill.killer_position),
         kill.victim_stamina_5s,
