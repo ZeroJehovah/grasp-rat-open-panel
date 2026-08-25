@@ -3,6 +3,19 @@
 const { Pool } = require('pg');
 const { ProjectionEngine, loadMapMetadata } = require('../domain/projector');
 const { BUSINESS_TIMEZONE, SCHEMA_VERSION, cloneJson, presetRangesForDates } = require('../domain/snapshot');
+const {
+  HistoryDayCache,
+  CANDIDATE_LIMIT,
+  enumerateDays,
+  decimalToNumber,
+  composeEventRows,
+  composePlayerAggregates,
+  selectPlayerCandidates,
+  rangeIncome
+} = require('./history-cache');
+
+const MESSAGE_COLUMNS = 'server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id';
+const KILL_COLUMNS = 'local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version';
 
 const HISTORY_ROW_LIMITS = Object.freeze({
   players: 5_000,
@@ -145,6 +158,14 @@ class PostgresPanelStore {
     this.pool = options.pool || new Pool({ connectionString: options.connectionString || process.env.DATABASE_URL });
     this.engine = options.engine || new ProjectionEngine(options);
     this.ownsPool = !options.pool;
+    // 按天分片是默认路径；PANEL_HISTORY_DAY_CACHE=0 退回原来的整区间查询，留一个逃生口，
+    // 万一线上发现拼接结果和直查有差异可以立刻切回去而不用回滚部署。
+    this.historyDayFragments = !(options.historyDayCache === false || process.env.PANEL_HISTORY_DAY_CACHE === '0');
+    this.dayCache = new HistoryDayCache(options.historyDayCacheOptions || {});
+  }
+
+  stats() {
+    return { historyDays: this.dayCache.stats(), dayFragments: this.historyDayFragments };
   }
 
   async close() {
@@ -166,7 +187,7 @@ class PostgresPanelStore {
       this.query('SELECT user_id, quota_day::text, initial_quota, quota_value, quota_source, last_snapshot_id, updated_at FROM player_quota_current'),
       this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id FROM player_daily_quota'),
       this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id, first_observed_at, last_observed_at FROM message_events'),
-      this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events'),
+      this.query(`SELECT ${KILL_COLUMNS} FROM kill_events`),
       this.query('SELECT server_day::text, drop_id, first_seen_snapshot_id, last_seen_snapshot_id, first_seen_at, last_seen_at, disappeared_at, source_user_id, system_spawned, x, y, amount, created_tick, source, confidence, kill_event_id FROM coin_drop_lifecycles'),
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats'),
       this.query('SELECT user_id, name, first_observed_at, last_observed_at FROM player_name_history'),
@@ -329,8 +350,8 @@ class PostgresPanelStore {
         LEFT JOIN player_quota_current q ON q.user_id = p.user_id
         LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
         `, [latest.server_day]),
-      this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id', [latest.server_day]),
-      this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id', [latest.server_day]),
+      this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id`, [latest.server_day]),
+      this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id`, [latest.server_day]),
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats WHERE local_date = $1::date', [latest.server_day]),
       this.query('SELECT user_id, quota_day::text, initial_quota, quota_value FROM player_quota_current WHERE quota_day = $1::date', [latest.server_day]),
       this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
@@ -361,8 +382,8 @@ class PostgresPanelStore {
     const latest = await this.getLatestVersion();
     const currentDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
     const [messages, kills, stats, quota, players] = await Promise.all([
-      this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]),
-      this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]),
+      this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]),
+      this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]),
       this.query('SELECT local_date::text, user_id, SUM(kills)::int AS kills, SUM(deaths)::int AS deaths FROM player_daily_stats WHERE local_date BETWEEN $1::date AND $2::date GROUP BY local_date, user_id ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.stats + 1]),
       this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at FROM player_daily_quota WHERE local_date BETWEEN $1::date AND $2::date ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.dailyQuota + 1]),
       this.query(`WITH ranged_income AS (
@@ -458,11 +479,11 @@ class PostgresPanelStore {
     if (versionToken && versionToken === latest.version_token) return { unchanged: true, versionToken: latest.version_token };
     const common = { versionToken: latest.version_token, latest, serverDay: String(latest.server_day).slice(0, 10) };
     if (resource === 'chat') {
-      const result = await this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id', [latest.server_day]);
+      const result = await this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id`, [latest.server_day]);
       return { ...common, messages: result.rows };
     }
     if (resource === 'kills') {
-      const result = await this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id', [latest.server_day]);
+      const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id`, [latest.server_day]);
       return { ...common, kills: result.rows };
     }
     if (resource === 'map') {
@@ -521,7 +542,7 @@ class PostgresPanelStore {
   async getRealtimePlayers(versionToken = null) { return this.getRealtimeResource('players', versionToken); }
   async getRealtimeKills(versionToken = null) { return this.getRealtimeResource('kills', versionToken); }
 
-  async getHistoryResource(resource, range) {
+  async getHistoryResourceDirect(resource, range) {
     const latest = await this.getLatestVersion();
     const latestDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
     const common = {
@@ -530,11 +551,11 @@ class PostgresPanelStore {
       closedThrough: latestDay && range.to < latestDay ? range.to : null
     };
     if (resource === 'chat') {
-      const result = await this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]);
+      const result = await this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]);
       return { ...common, messages: limitedRows(result, 'messages', HISTORY_ROW_LIMITS.messages) };
     }
     if (resource === 'kills') {
-      const result = await this.query('SELECT local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]);
+      const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]);
       return { ...common, kills: limitedRows(result, 'kills', HISTORY_ROW_LIMITS.kills) };
     }
     if (resource === 'players') {
@@ -575,6 +596,99 @@ class PostgresPanelStore {
           .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin') || a.userId - b.userId)
       };
     }
+    throw new Error(`unknown history resource: ${resource}`);
+  }
+
+  // 按天分片的查询。每天单独取 limit + 1 行，行数上限在拼接完成后按总数判断，413 的
+  // 语义和原来的整区间查询一致。
+  async getMessageDayRows(day) {
+    const result = await this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day = $1::date ORDER BY event_at, message_id LIMIT $2`, [day, HISTORY_ROW_LIMITS.messages + 1]);
+    return result.rows;
+  }
+
+  async getKillDayRows(day) {
+    const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date = $1::date ORDER BY event_at, kill_id LIMIT $2`, [day, HISTORY_ROW_LIMITS.kills + 1]);
+    return result.rows;
+  }
+
+  // 玩家维度按天缓存的只有"每个用户当天的战绩和配额"这一层：它是全量用户、不做截断，
+  // 所以跨天可加。numeric 一律取文本，精确的十进制求和在 JS 侧做。
+  async getPlayerDayRows(day) {
+    const result = await this.query(`SELECT COALESCE(s.user_id, q.user_id) AS user_id, s.kills, s.deaths,
+        (q.user_id IS NOT NULL) AS has_quota,
+        q.initial_quota::text AS initial_quota, q.closing_quota::text AS closing_quota, q.income::text AS income
+      FROM (SELECT user_id, kills, deaths FROM player_daily_stats WHERE local_date = $1::date) s
+      FULL JOIN (SELECT user_id, initial_quota, closing_quota, income FROM player_daily_quota WHERE local_date = $1::date) q ON q.user_id = s.user_id`, [day]);
+    return result.rows;
+  }
+
+  // drop 只看最新快照那天的实时状态，和查询区间无关，所以它不按天缓存而是按版本缓存。
+  // player_state_current 的主键就是 user_id，且有指向 players 的外键，所以直接在这张表上
+  // 排名和原来在 players LEFT JOIN 之后排名等价。
+  async getPlayerDropTopRows(day, limit) {
+    const result = await this.query(`SELECT user_id FROM player_state_current
+      WHERE server_day = $1::date AND NULLIF(state->>'death_drop_coins', '') IS NOT NULL
+      ORDER BY NULLIF(state->>'death_drop_coins', '')::numeric DESC, user_id LIMIT $2`, [day, limit]);
+    return result.rows;
+  }
+
+  async getPlayerCandidateRows(userIds) {
+    const result = await this.query(`SELECT p.user_id, p.current_name, p.last_seen_at, p.current_entity_id, p.online,
+        c.server_day::text, c.snapshot_id, c.observed_at, c.state
+      FROM players p
+      LEFT JOIN player_state_current c ON c.user_id = p.user_id
+      WHERE p.user_id = ANY($1::bigint[])
+      ORDER BY p.user_id`, [userIds]);
+    return result.rows;
+  }
+
+  async getHistoryEventRows(kind, range, context) {
+    const limit = kind === 'messages' ? HISTORY_ROW_LIMITS.messages : HISTORY_ROW_LIMITS.kills;
+    const fetch = kind === 'messages' ? day => this.getMessageDayRows(day) : day => this.getKillDayRows(day);
+    const fragments = await this.dayCache.loadDays(kind, enumerateDays(range), context, fetch);
+    const rows = composeEventRows(fragments);
+    if (rows.length > limit) throw historyLimitError(kind, limit);
+    return rows;
+  }
+
+  async getHistoryPlayerRows(range, context) {
+    const dropDay = context.latestDay || range.to;
+    const [fragments, dropRows] = await Promise.all([
+      this.dayCache.loadDays('playerDaily', enumerateDays(range), context, day => this.getPlayerDayRows(day)),
+      this.dayCache.loadDay('playerDrop', dropDay, { latestDay: dropDay, token: context.token }, day => this.getPlayerDropTopRows(day, CANDIDATE_LIMIT))
+    ]);
+    const aggregates = composePlayerAggregates(fragments);
+    const candidateIds = selectPlayerCandidates(aggregates, dropRows.map(row => row.user_id));
+    if (candidateIds.length > HISTORY_ROW_LIMITS.players) throw historyLimitError('players', HISTORY_ROW_LIMITS.players);
+    const rows = candidateIds.length === 0 ? [] : await this.getPlayerCandidateRows(candidateIds);
+    return rows
+      .map(row => rowToPlayer({
+        ...row,
+        // 原来是 CASE WHEN rq.user_id IS NULL THEN NULL ELSE $1::text END。
+        quota_day: aggregates.get(Number(row.user_id))?.hasQuota ? range.from : null,
+        initial_quota: aggregates.get(Number(row.user_id))?.initialQuota ?? null,
+        quota_value: aggregates.get(Number(row.user_id))?.quotaValue ?? null,
+        income: decimalToNumber(rangeIncome(aggregates.get(Number(row.user_id)) || { hasQuota: false }))
+      }, {
+        kills: Number(aggregates.get(Number(row.user_id))?.kills || 0),
+        deaths: Number(aggregates.get(Number(row.user_id))?.deaths || 0)
+      }, { currentDay: context.latestDay }))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hans-u-co-pinyin') || a.userId - b.userId);
+  }
+
+  async getHistoryResource(resource, range) {
+    if (!this.historyDayFragments) return this.getHistoryResourceDirect(resource, range);
+    const latest = await this.getLatestVersion();
+    const latestDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
+    const context = { latestDay, token: latest?.version_token || latest?.snapshot_id || null };
+    const common = {
+      from: range.from,
+      to: range.to,
+      closedThrough: latestDay && range.to < latestDay ? range.to : null
+    };
+    if (resource === 'chat') return { ...common, messages: await this.getHistoryEventRows('messages', range, context) };
+    if (resource === 'kills') return { ...common, kills: await this.getHistoryEventRows('kills', range, context) };
+    if (resource === 'players') return { ...common, players: await this.getHistoryPlayerRows(range, context) };
     throw new Error(`unknown history resource: ${resource}`);
   }
 

@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { ResponseCache, TtlMemo, ifNoneMatchSatisfied } = require('../api/cache');
+const { ResponseCache, TtlMemo, ifNoneMatchSatisfied, negotiateEncoding } = require('../api/cache');
 
 function entry(text) {
   return { body: Buffer.from(text, 'utf8'), etag: `"${text}"` };
@@ -22,6 +22,29 @@ function entry(text) {
   // 引号里带逗号的 ETag 不能被按逗号切碎。
   assert.strictEqual(ifNoneMatchSatisfied('W/"a,b"', '"a,b"'), true);
   assert.strictEqual(ifNoneMatchSatisfied('not-an-etag', '"abc"'), false);
+
+  // 自己协商编码是为了在命中缓存时直接送出缓存好的压缩结果。判断不了就返回 null，
+  // 退回 @fastify/compress 每次现压——失败方向是"慢一点"，不是"错"。
+  const encodings = ['br', 'gzip'];
+  assert.strictEqual(negotiateEncoding('br, gzip', encodings), 'br');
+  assert.strictEqual(negotiateEncoding('gzip, deflate, br', encodings), 'br');
+  assert.strictEqual(negotiateEncoding('gzip, deflate', encodings), 'gzip');
+  assert.strictEqual(negotiateEncoding('GZIP', encodings), 'gzip');
+  assert.strictEqual(negotiateEncoding('x-gzip', encodings), 'gzip', 'x-gzip is the historical alias for gzip');
+  assert.strictEqual(negotiateEncoding('*', encodings), 'br');
+  assert.strictEqual(negotiateEncoding('deflate', encodings), null);
+  assert.strictEqual(negotiateEncoding('identity', encodings), null);
+  assert.strictEqual(negotiateEncoding('', encodings), null);
+  assert.strictEqual(negotiateEncoding(undefined, encodings), null);
+  assert.strictEqual(negotiateEncoding('br, gzip', []), null);
+  // q 值必须生效，q=0 是明确的拒绝。
+  assert.strictEqual(negotiateEncoding('br;q=0.1, gzip;q=0.9', encodings), 'gzip');
+  assert.strictEqual(negotiateEncoding('br;q=0, gzip', encodings), 'gzip');
+  assert.strictEqual(negotiateEncoding('br;q=0, gzip;q=0', encodings), null);
+  assert.strictEqual(negotiateEncoding('*;q=0, br', encodings), 'br');
+  assert.strictEqual(negotiateEncoding('br;q=0, *', encodings), 'gzip');
+  assert.strictEqual(negotiateEncoding('gzip; q = 0.5 , br; q=0.4', encodings), 'gzip');
+  assert.strictEqual(negotiateEncoding('br;q=bogus', encodings), null);
 
   let clock = 1_000;
   const cache = new ResponseCache({ maxEntries: 3, maxBytes: 1_000, now: () => clock });
@@ -100,6 +123,35 @@ function entry(text) {
   await disabled.load('k', 0, build('x'));
   await disabled.load('k', 0, build('x'));
   assert.strictEqual(disabled.stats().entries, 0);
+
+  // 压缩结果挂在缓存条目上，字节要补记进权重，否则一个装满压缩结果的缓存会悄悄超预算。
+  const encoded = new ResponseCache({ maxEntries: 10, maxBytes: 1_000, now: () => clock });
+  const held = (await encoded.load('body', 60_000, async () => entry('payload'))).entry;
+  const baseBytes = encoded.stats().bytes;
+  encoded.noteEncoded(held, 'br', Buffer.alloc(30));
+  assert.strictEqual(encoded.encodedFor(held, 'br').length, 30);
+  assert.strictEqual(encoded.stats().bytes, baseBytes + 30);
+  assert.strictEqual(encoded.stats().compressions, 1);
+  assert.strictEqual(encoded.stats().encodedBytes, 30);
+  // 同一个条目可以同时挂 br 和 gzip 两份。
+  encoded.noteEncoded(held, 'gzip', Buffer.alloc(40));
+  assert.strictEqual(encoded.stats().bytes, baseBytes + 70);
+  assert.strictEqual(encoded.encodedFor(held, 'gzip').length, 40);
+  // 再取一次拿到的是同一个条目，压缩结果还在——命中缓存不重新压缩靠这个。
+  const rehit = await encoded.load('body', 60_000, async () => entry('payload'));
+  assert.strictEqual(rehit.state, 'hit');
+  assert.strictEqual(encoded.encodedFor(rehit.entry, 'br').length, 30);
+  assert.strictEqual(encoded.encodedFor(rehit.entry, 'deflate'), null);
+  assert.strictEqual(encoded.encodedFor(null, 'br'), null);
+  // 权重补记以后条目被淘汰时也要把这些字节一起扣掉。
+  encoded.noteEncoded(held, 'br', Buffer.alloc(1_100));
+  assert.strictEqual(encoded.stats().entries, 0, 'an entry that outgrows the budget is evicted');
+  assert.strictEqual(encoded.stats().bytes, 0);
+  // 没进缓存的旁路条目不参与计费，但压缩结果照样能挂上去用一次。
+  const bypassEntry = (await encoded.load(null, 60_000, async () => entry('nocache'))).entry;
+  encoded.noteEncoded(bypassEntry, 'br', Buffer.alloc(10));
+  assert.strictEqual(encoded.stats().bytes, 0);
+  assert.strictEqual(encoded.encodedFor(bypassEntry, 'br').length, 10);
 
   let memoClock = 0;
   const memo = new TtlMemo({ ttlMs: 1_000, now: () => memoClock });

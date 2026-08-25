@@ -112,7 +112,27 @@ function fixture() {
   await postgresStore.getHistoryKills({ from: '2026-08-22', to: '2026-08-22' });
   assert.ok(postgresCalls.some(call => call.text.includes('message_events') && call.values?.[0] === '2026-08-22'));
   assert.ok(postgresCalls.some(call => call.text.includes('kill_events') && call.values?.[0] === '2026-08-22'));
-  assert.ok(postgresCalls.some(call => call.text.includes('ranged_quota') && call.values?.[0] === '2026-08-22' && call.values?.[1] === '2026-08-22'));
+  // 玩家维度只按天缓存"当天每个用户的战绩和配额"，排名和 drop 每次现查。
+  assert.ok(postgresCalls.some(call => call.text.includes('FULL JOIN') && call.text.includes('player_daily_quota') && call.values?.[0] === '2026-08-22'));
+  assert.ok(postgresCalls.some(call => call.text.includes('death_drop_coins') && call.values?.[0] === '2026-08-22' && call.values?.[1] === 50));
+  assert.ok(!postgresCalls.some(call => call.text.includes('ranged_quota')), 'the default history path must not fall back to the range query');
+  // 同一天再问一次只应该命中分片缓存，不再查库。
+  const messageQueriesBefore = postgresCalls.filter(call => call.text.includes('message_events')).length;
+  await postgresStore.getHistoryChat({ from: '2026-08-22', to: '2026-08-22' });
+  assert.strictEqual(postgresCalls.filter(call => call.text.includes('message_events')).length, messageQueriesBefore, 'a cached day fragment must not re-query');
+  assert.ok(postgresStore.stats().historyDays.hits > 0);
+
+  // 逃生口：关掉按天分片以后必须退回原来的整区间查询。
+  const directCalls = [];
+  const directStore = new PostgresPanelStore({
+    pool: { query: async (text, values) => { directCalls.push({ text, values }); return { rows: [] }; } },
+    engine: new ProjectionEngine({ minSteadyEntities: 1 }),
+    historyDayCache: false
+  });
+  await directStore.getHistoryPlayers({ from: '2026-08-22', to: '2026-08-22' });
+  await directStore.getHistoryChat({ from: '2026-08-22', to: '2026-08-22' });
+  assert.ok(directCalls.some(call => call.text.includes('ranged_quota')), 'historyDayCache=false must use the range query');
+  assert.ok(directCalls.some(call => call.text.includes('message_events') && call.values?.[1] === '2026-08-22'));
   const staticApp = await buildServer({ store, staticDirectory: path.resolve(__dirname, '../frontend'), requireStatic: true });
   const staticAsset = await staticApp.inject({ method: 'GET', url: '/src/App.tsx' });
   assert.strictEqual(staticAsset.statusCode, 200);
@@ -122,9 +142,40 @@ function fixture() {
     getMeta: async () => ({ earliestDate: '2026-08-22', latestDate: '2026-08-22' }),
     getHistory: async () => ({ from: '2026-08-22', to: '2026-08-22', timezone: 'Asia/Shanghai', closedThrough: null, players: Array.from({ length: 100 }, (_, index) => ({ userId: index, name: 'compression-fixture-' + 'x'.repeat(32) })), messages: [], kills: [], dailyQuota: [], stats: [] })
   } });
-  const compressedHistory = await compressedApp.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22', headers: { 'accept-encoding': 'gzip' } });
+  const compressedUrl = '/api/v1/history?from=2026-08-22&to=2026-08-22';
+  const compressedHistory = await compressedApp.inject({ method: 'GET', url: compressedUrl, headers: { 'accept-encoding': 'gzip' } });
   assert.strictEqual(compressedHistory.headers['content-encoding'], 'gzip');
   assert.strictEqual(JSON.parse(zlib.gunzipSync(compressedHistory.rawPayload).toString('utf8')).from, '2026-08-22');
+
+  // 压缩结果也进缓存：同一条响应每种编码只压一次。压缩曾经是命中缓存后最贵的一步，
+  // 1.1 MB 的响应体单 brotli 就要三十多毫秒，而且每个请求都要重做一遍。
+  const identity = await compressedApp.inject({ method: 'GET', url: compressedUrl });
+  assert.strictEqual(identity.headers['content-encoding'], undefined);
+  const brotli = await compressedApp.inject({ method: 'GET', url: compressedUrl, headers: { 'accept-encoding': 'gzip, br' } });
+  assert.strictEqual(brotli.headers['content-encoding'], 'br', 'br must win over gzip when both are acceptable');
+  assert.strictEqual(brotli.headers.vary, 'accept-encoding');
+  assert.strictEqual(zlib.brotliDecompressSync(brotli.rawPayload).toString('utf8'), identity.body, 'the compressed body must decode to the identity body');
+  assert.strictEqual(zlib.gunzipSync(compressedHistory.rawPayload).toString('utf8'), identity.body);
+  await compressedApp.inject({ method: 'GET', url: compressedUrl, headers: { 'accept-encoding': 'br' } });
+  await compressedApp.inject({ method: 'GET', url: compressedUrl, headers: { 'accept-encoding': 'gzip' } });
+  assert.strictEqual(compressedApp.panelCache.stats().compressions, 2, 'each encoding must be compressed once and then reused');
+  assert.ok(compressedApp.panelCache.stats().encodedBytes > 0);
+  // 认不出来的编码退回插件处理，插件只提供 br/gzip/deflate，所以结果是不压缩。
+  const unknownEncoding = await compressedApp.inject({ method: 'GET', url: compressedUrl, headers: { 'accept-encoding': 'zstd' } });
+  assert.strictEqual(unknownEncoding.headers['content-encoding'], undefined);
+  assert.strictEqual(unknownEncoding.body, identity.body);
+  const suppressed = await compressedApp.inject({ method: 'GET', url: compressedUrl, headers: { 'accept-encoding': 'br', 'x-no-compression': '1' } });
+  assert.strictEqual(suppressed.headers['content-encoding'], undefined);
+  // 条件请求仍然先于压缩返回 304，304 不能带 Content-Encoding。
+  const conditionalCompressed = await compressedApp.inject({ method: 'GET', url: compressedUrl, headers: { 'accept-encoding': 'br', 'if-none-match': `W/${identity.headers.etag}` } });
+  assert.strictEqual(conditionalCompressed.statusCode, 304);
+  assert.strictEqual(conditionalCompressed.headers['content-encoding'], undefined);
+  assert.strictEqual(conditionalCompressed.headers.vary, 'accept-encoding');
+  assert.strictEqual(compressedApp.panelCache.stats().compressions, 2);
+  // 小响应体不压缩：阈值和 @fastify/compress 的配置一致。
+  const smallMeta = await compressedApp.inject({ method: 'GET', url: '/api/v1/meta', headers: { 'accept-encoding': 'br' } });
+  assert.ok(smallMeta.rawPayload.length < 1024);
+  assert.strictEqual(smallMeta.headers['content-encoding'], undefined);
   await compressedApp.close();
   const cachedHistory = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22', headers: { 'if-none-match': history.headers.etag } });
   assert.strictEqual(cachedHistory.statusCode, 304);

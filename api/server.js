@@ -2,13 +2,14 @@
 
 const crypto = require('crypto');
 const path = require('path');
+const zlib = require('zlib');
 const Fastify = require('fastify');
 const fastifyCompress = require('@fastify/compress');
 
 const { ProjectionEngine } = require('../domain/projector');
 const { HISTORY_ROW_LIMITS, PostgresPanelStore } = require('../storage/postgres-store');
 const { collectorHealth } = require('../collector/health');
-const { ResponseCache, TtlMemo, ifNoneMatchSatisfied } = require('./cache');
+const { ResponseCache, TtlMemo, ifNoneMatchSatisfied, negotiateEncoding } = require('./cache');
 const { BUSINESS_TIMEZONE, SCHEMA_VERSION, businessDateRange, isDateRangeCovered } = require('../domain/snapshot');
 
 // 缓存键已经表达了失效条件，TTL 只是内存回收和迟到写入的上界。已结束的日期共享一条
@@ -24,6 +25,20 @@ const REALTIME_CACHE_CONTROL = 'public, max-age=5, s-maxage=10, stale-while-reva
 const REALTIME_CDN_CACHE_CONTROL = 'public, max-age=10, stale-while-revalidate=30';
 const HISTORY_OPEN_CACHE_CONTROL = 'public, max-age=5, s-maxage=10, stale-while-revalidate=30';
 const HISTORY_CLOSED_CACHE_CONTROL = 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400';
+
+// 压缩本来由 @fastify/compress 每次请求现做，1.1 MB 的响应体单这一步就要三十多毫秒，
+// 比命中缓存后剩下的所有工作都贵。这里自己协商编码并把压缩结果缓存下来，参数刻意和
+// 插件对齐（阈值 1024、brotli quality 4），这样客户端拿到的字节和之前一致。
+// 一旦设了 Content-Encoding，插件的 onSend 会直接放行，不会二次压缩。
+const COMPRESSION_ENCODINGS = Object.freeze(['br', 'gzip']);
+const COMPRESSION_THRESHOLD = 1024;
+const BROTLI_OPTIONS = { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } };
+
+function compressBody(encoding, body) {
+  if (encoding === 'br') return zlib.brotliCompressSync(body, BROTLI_OPTIONS);
+  if (encoding === 'gzip') return zlib.gzipSync(body);
+  return null;
+}
 
 function etagFor(payload) {
   return `"${crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')}"`;
@@ -120,13 +135,21 @@ async function respondCached(request, reply, { cache, key, ttlMs, cacheControl, 
   });
   reply.header('X-Panel-Cache', key ? state : 'bypass');
   reply.header('ETag', entry.etag);
+  // 响应体随协商出的编码而变，Vary 必须在 304 之前就设上。
+  reply.header('Vary', 'accept-encoding');
   if (cacheControl) {
     reply.header('Cache-Control', cacheControl);
     reply.header('CDN-Cache-Control', cdnCacheControl || cacheControl);
   }
   if (ifNoneMatchSatisfied(request.headers['if-none-match'], entry.etag)) return reply.code(304).send();
   reply.type('application/json; charset=utf-8');
-  return reply.send(entry.body);
+  const encoding = request.headers['x-no-compression'] !== undefined || entry.body.length < COMPRESSION_THRESHOLD
+    ? null
+    : negotiateEncoding(request.headers['accept-encoding'], COMPRESSION_ENCODINGS);
+  if (!encoding) return reply.send(entry.body);
+  const encoded = cache.encodedFor(entry, encoding) || cache.noteEncoded(entry, encoding, compressBody(encoding, entry.body));
+  reply.header('Content-Encoding', encoding);
+  return reply.send(encoded);
 }
 
 async function buildServer(options = {}) {
@@ -152,7 +175,8 @@ async function buildServer(options = {}) {
 
   app.get('/healthz', async (request, reply) => {
     const health = typeof app.collectorHealth === 'function' ? await app.collectorHealth() : null;
-    return { ok: true, generatedAt: new Date().toISOString(), collector: health, cache: cache.stats() };
+    const storeStats = typeof store.stats === 'function' ? store.stats() : null;
+    return { ok: true, generatedAt: new Date().toISOString(), collector: health, cache: cache.stats(), store: storeStats };
   });
 
   app.get('/api/v1/meta', async (request, reply) => respondCached(request, reply, {
