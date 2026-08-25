@@ -322,5 +322,93 @@ function fixture() {
   assert.strictEqual(unhashed.headers['cache-control'], 'public, max-age=3600', 'assets/ 下没有哈希的文件不能当不变对象');
   await distApp.close();
   fs.rmSync(distDirectory, { recursive: true, force: true });
+  // 回归：合并实时端点的玩家查询是 LEFT JOIN player_state_current，没有当天状态行的玩家
+  // state 是 null，筛选"体力没满"时不能直接点进去，否则整个端点 500。
+  const nullStatePool = {
+    query: async text => {
+      if (text.includes('FROM snapshot_versions WHERE completeness')) return { rows: [{ snapshot_id: 'ns-s1', version_token: 'ns-v1', server_day: '2026-08-22', server_tick: 1, observed_at: '2026-08-22T00:00:00.000Z' }] };
+      if (text.includes('LEFT JOIN player_quota_current')) return { rows: [{ user_id: 9, current_name: 'no-state', online: true, server_day: null, state: null }] };
+      return { rows: [] };
+    }
+  };
+  const nullStateApp = await buildServer({ store: new PostgresPanelStore({ pool: nullStatePool, engine: new ProjectionEngine({ minSteadyEntities: 1 }) }) });
+  const nullStateRealtime = await nullStateApp.inject({ method: 'GET', url: '/api/v1/realtime' });
+  assert.strictEqual(nullStateRealtime.statusCode, 200, '没有当天状态行的玩家不能让合并实时端点 500');
+  assert.deepStrictEqual(nullStateRealtime.json().players, [], 'state 为 null 的玩家既没有 drop 也不算体力没满');
+  await nullStateApp.close();
+
+  // 历史分页：过滤和裁剪在路由层做，store 仍然返回整个区间。
+  const pageMessages = Array.from({ length: 250 }, (_, index) => ({ message_id: `m${index}`, event_at: `2026-08-20T00:00:${String(index % 60).padStart(2, '0')}Z` }));
+  const pageKills = Array.from({ length: 12 }, (_, index) => ({
+    kill_id: `k${index}`,
+    event_at: `2026-08-20T00:00:${String(index).padStart(2, '0')}Z`,
+    killer_user_id: index % 3 === 0 ? 11 : 12,
+    killer_name: index % 3 === 0 ? '甲' : '乙',
+    victim_user_id: 20 + (index % 2),
+    victim_name: index % 2 === 0 ? '丙' : '丁',
+    drop: { amount: index === 5 ? null : index * 100 }
+  }));
+  const pageCalls = [];
+  const pageApp = await buildServer({ store: {
+    getMeta: async () => ({ earliestDate: '2026-08-20', latestDate: '2026-08-22', availableDates: ['2026-08-20', '2026-08-21', '2026-08-22'] }),
+    getLatestVersion: async () => ({ version_token: 'page-v1', server_day: '2026-08-22' }),
+    getHistoryChat: async (range, latest, rowCap) => { pageCalls.push({ resource: 'chat', rowCap }); return { from: range.from, to: range.to, closedThrough: range.to, messages: pageMessages }; },
+    getHistoryKills: async (range, latest, rowCap) => { pageCalls.push({ resource: 'kills', rowCap }); return { from: range.from, to: range.to, closedThrough: range.to, kills: pageKills }; },
+    getHistoryPlayers: async range => ({ from: range.from, to: range.to, closedThrough: range.to, players: [] })
+  } });
+  const chatBase = '/api/v1/history/chat?from=2026-08-20&to=2026-08-20';
+  const noPage = await pageApp.inject({ method: 'GET', url: chatBase });
+  assert.strictEqual(noPage.json().messages.length, 250, '不带分页参数必须保持原来的整区间行为');
+  assert.strictEqual(noPage.json().pagination, undefined);
+  assert.strictEqual(pageCalls.at(-1).rowCap, null, '整区间请求不能抬高 store 的行数上限');
+  const firstPage = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100` });
+  assert.strictEqual(firstPage.json().messages.length, 100);
+  assert.deepStrictEqual(firstPage.json().pagination, { page: 1, pageSize: 100, total: 250, totalPages: 3, hasPrev: false, hasNext: true });
+  assert.deepStrictEqual(firstPage.json().messages[0], pageMessages[0]);
+  assert.strictEqual(pageCalls.at(-1).rowCap, 200_000, '分页请求必须抬高 store 的行数上限');
+  const lastPage = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&page=last` });
+  assert.strictEqual(lastPage.json().pagination.page, 3);
+  assert.strictEqual(lastPage.json().messages.length, 50);
+  const clamped = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&page=99` });
+  assert.strictEqual(clamped.json().pagination.page, 3, '越界页号夹到最后一页而不是报错');
+  const pageTwo = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&page=2` });
+  assert.notStrictEqual(pageTwo.headers.etag, firstPage.headers.etag, '不同页必须有不同的 ETag');
+  assert.strictEqual(pageTwo.headers['x-panel-cache'], 'miss');
+  assert.strictEqual((await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&page=2` })).headers['x-panel-cache'], 'hit');
+  for (const bad of ['pageSize=250', 'pageSize=100&page=0', 'pageSize=100&page=x', 'page=2', 'minDrop=1']) {
+    const response = await pageApp.inject({ method: 'GET', url: `${chatBase}&${bad}` });
+    assert.strictEqual(response.statusCode, 400, `${bad} 必须被拒绝`);
+    assert.strictEqual(response.json().error, 'invalid_pagination');
+    assert.strictEqual(response.headers['cache-control'], 'no-store');
+  }
+  const killsBase = '/api/v1/history/kills?from=2026-08-20&to=2026-08-20';
+  const dropFiltered = await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&minDrop=500` });
+  assert.deepStrictEqual(dropFiltered.json().kills.map(kill => kill.kill_id), ['k6', 'k7', 'k8', 'k9', 'k10', 'k11'], '金额未知的击杀在有阈值时必须排除');
+  assert.strictEqual(dropFiltered.json().pagination.total, 6);
+  // 候选表按拼音排序：丙(20) < 丁(21) < 甲(11) < 乙(12)。
+  assert.deepStrictEqual(dropFiltered.json().filterOptions.players.map(player => player.userId), [20, 21, 11, 12]);
+  const userFiltered = await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&minDrop=500&users=11` });
+  assert.deepStrictEqual(userFiltered.json().kills.map(kill => kill.kill_id), ['k6', 'k9'], 'users 同时匹配击杀者和被击杀者');
+  assert.strictEqual(userFiltered.json().pagination.total, 2);
+  assert.deepStrictEqual(userFiltered.json().filterOptions.players.map(player => player.userId), [20, 21, 11, 12], '候选表按阈值算，不受已勾选的人影响');
+  const orphanSelection = await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&minDrop=100000&users=12` });
+  assert.strictEqual(orphanSelection.json().pagination.total, 0);
+  assert.deepStrictEqual(orphanSelection.json().filterOptions.players, [{ userId: 12, name: '乙' }], '已勾选的人即使在新阈值下没有击杀也要留在候选表里');
+  const filterOnly = await pageApp.inject({ method: 'GET', url: `${killsBase}&minDrop=500` });
+  assert.strictEqual(filterOnly.json().kills.length, 6, '只给过滤条件不给页大小时仍然返回全部命中行');
+  assert.strictEqual(filterOnly.json().pagination, undefined);
+  const orderedUsers = await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&users=12,11` });
+  assert.strictEqual(orderedUsers.headers.etag, (await pageApp.inject({ method: 'GET', url: `${killsBase}&pageSize=100&users=11,12` })).headers.etag, 'users 顺序不同不能各占一条缓存');
+  for (const bad of ['pageSize=100', 'minDrop=1', 'users=1'].map(query => `/api/v1/history/players?from=2026-08-20&to=2026-08-20&${query}`).concat(['/api/v1/history?from=2026-08-20&to=2026-08-20&pageSize=100'])) {
+    const response = await pageApp.inject({ method: 'GET', url: bad });
+    assert.strictEqual(response.statusCode, 400, `${bad} 必须被拒绝`);
+    assert.strictEqual(response.json().error, 'invalid_pagination');
+  }
+  const negativeDrop = await pageApp.inject({ method: 'GET', url: `${killsBase}&minDrop=-1` });
+  assert.strictEqual(negativeDrop.statusCode, 400);
+  const tooManyUsers = await pageApp.inject({ method: 'GET', url: `${killsBase}&users=${Array.from({ length: 65 }, (_, index) => index + 1).join(',')}` });
+  assert.strictEqual(tooManyUsers.statusCode, 400);
+  await pageApp.close();
+
   console.log('api tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

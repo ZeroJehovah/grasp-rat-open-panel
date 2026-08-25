@@ -360,7 +360,7 @@ class PostgresPanelStore {
     let players = playersResult.rows.map(row => rowToPlayer(row, stats.get(String(row.user_id)), { currentDay: latest.server_day }));
     players = players.filter(player => {
       const state = player.state;
-      const tired = state?.stamina1d !== null && state?.stamina1dLimit !== null && state?.stamina1d < state.stamina1dLimit;
+      const tired = Boolean(state && state.stamina1d !== null && state.stamina1dLimit !== null && state.stamina1d < state.stamina1dLimit);
       return (player.drop !== null && player.drop >= 1) || tired;
     });
     return {
@@ -497,7 +497,7 @@ class PostgresPanelStore {
       ]);
       let players = playersResult.rows.map(row => rowToPlayer(row, { kills: 0, deaths: 0 }, { currentDay: latest.server_day }));
       players = players.filter(player => {
-        const tired = player.state?.stamina1d !== null && player.state?.stamina1dLimit !== null && player.state.stamina1d < player.state.stamina1dLimit;
+        const tired = Boolean(player.state && player.state.stamina1d !== null && player.state.stamina1dLimit !== null && player.state.stamina1d < player.state.stamina1dLimit);
         return (player.drop !== null && player.drop >= 1) || tired;
       });
       return { ...common, map: mapResult.rows[0]?.payload || this.engine.mapMetadata, players: players.map(mapPlayerView) };
@@ -542,7 +542,9 @@ class PostgresPanelStore {
   async getRealtimePlayers(versionToken = null) { return this.getRealtimeResource('players', versionToken); }
   async getRealtimeKills(versionToken = null) { return this.getRealtimeResource('kills', versionToken); }
 
-  async getHistoryResourceDirect(resource, range) {
+  // rowCap 只有分页请求会传：那时响应里只有一页，整区间行数不再是响应大小的上界，
+  // 但仍要有个上界兜住异常大的区间。不传就沿用原来的 HISTORY_ROW_LIMITS。
+  async getHistoryResourceDirect(resource, range, rowCap = null) {
     const latest = await this.getLatestVersion();
     const latestDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
     const common = {
@@ -551,12 +553,14 @@ class PostgresPanelStore {
       closedThrough: latestDay && range.to < latestDay ? range.to : null
     };
     if (resource === 'chat') {
-      const result = await this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]);
-      return { ...common, messages: limitedRows(result, 'messages', HISTORY_ROW_LIMITS.messages) };
+      const limit = rowCap || HISTORY_ROW_LIMITS.messages;
+      const result = await this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3`, [range.from, range.to, limit + 1]);
+      return { ...common, messages: limitedRows(result, 'messages', limit) };
     }
     if (resource === 'kills') {
-      const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]);
-      return { ...common, kills: limitedRows(result, 'kills', HISTORY_ROW_LIMITS.kills) };
+      const limit = rowCap || HISTORY_ROW_LIMITS.kills;
+      const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3`, [range.from, range.to, limit + 1]);
+      return { ...common, kills: limitedRows(result, 'kills', limit) };
     }
     if (resource === 'players') {
       const result = await this.query(`WITH ranged_stats AS (
@@ -599,16 +603,17 @@ class PostgresPanelStore {
     throw new Error(`unknown history resource: ${resource}`);
   }
 
-  // 按天分片的查询。每天单独取 limit + 1 行，行数上限在拼接完成后按总数判断，413 的
-  // 语义和原来的整区间查询一致。
+  // 按天分片的查询。单天超过上限就地报错（一天的量级是几百行，这条只是防止分页请求
+  // 抬高总数上限之后把某天静默截断），跨天总数上限在拼接完成后判断，413 的语义和原来的
+  // 整区间查询一致。分片本身不带分页参数，所以分页请求和整区间请求共用同一份分片缓存。
   async getMessageDayRows(day) {
     const result = await this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day = $1::date ORDER BY event_at, message_id LIMIT $2`, [day, HISTORY_ROW_LIMITS.messages + 1]);
-    return result.rows;
+    return limitedRows(result, 'messages', HISTORY_ROW_LIMITS.messages);
   }
 
   async getKillDayRows(day) {
     const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date = $1::date ORDER BY event_at, kill_id LIMIT $2`, [day, HISTORY_ROW_LIMITS.kills + 1]);
-    return result.rows;
+    return limitedRows(result, 'kills', HISTORY_ROW_LIMITS.kills);
   }
 
   // 玩家维度按天缓存的只有"每个用户当天的战绩和配额"这一层：它是全量用户、不做截断，
@@ -642,8 +647,8 @@ class PostgresPanelStore {
     return result.rows;
   }
 
-  async getHistoryEventRows(kind, range, context) {
-    const limit = kind === 'messages' ? HISTORY_ROW_LIMITS.messages : HISTORY_ROW_LIMITS.kills;
+  async getHistoryEventRows(kind, range, context, rowCap = null) {
+    const limit = rowCap || (kind === 'messages' ? HISTORY_ROW_LIMITS.messages : HISTORY_ROW_LIMITS.kills);
     const fetch = kind === 'messages' ? day => this.getMessageDayRows(day) : day => this.getKillDayRows(day);
     const fragments = await this.dayCache.loadDays(kind, enumerateDays(range), context, fetch);
     const rows = composeEventRows(fragments);
@@ -677,8 +682,8 @@ class PostgresPanelStore {
   }
 
   // latest 由路由传进来：它为了算缓存键已经查过一次版本，这里没有理由再查一遍。
-  async getHistoryResource(resource, range, latestVersion) {
-    if (!this.historyDayFragments) return this.getHistoryResourceDirect(resource, range);
+  async getHistoryResource(resource, range, latestVersion, rowCap = null) {
+    if (!this.historyDayFragments) return this.getHistoryResourceDirect(resource, range, rowCap);
     const latest = latestVersion || await this.getLatestVersion();
     const latestDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
     const context = { latestDay, token: latest?.version_token || latest?.snapshot_id || null };
@@ -687,15 +692,15 @@ class PostgresPanelStore {
       to: range.to,
       closedThrough: latestDay && range.to < latestDay ? range.to : null
     };
-    if (resource === 'chat') return { ...common, messages: await this.getHistoryEventRows('messages', range, context) };
-    if (resource === 'kills') return { ...common, kills: await this.getHistoryEventRows('kills', range, context) };
+    if (resource === 'chat') return { ...common, messages: await this.getHistoryEventRows('messages', range, context, rowCap) };
+    if (resource === 'kills') return { ...common, kills: await this.getHistoryEventRows('kills', range, context, rowCap) };
     if (resource === 'players') return { ...common, players: await this.getHistoryPlayerRows(range, context) };
     throw new Error(`unknown history resource: ${resource}`);
   }
 
-  async getHistoryChat(range, latestVersion) { return this.getHistoryResource('chat', range, latestVersion); }
+  async getHistoryChat(range, latestVersion, rowCap = null) { return this.getHistoryResource('chat', range, latestVersion, rowCap); }
   async getHistoryPlayers(range, latestVersion) { return this.getHistoryResource('players', range, latestVersion); }
-  async getHistoryKills(range, latestVersion) { return this.getHistoryResource('kills', range, latestVersion); }
+  async getHistoryKills(range, latestVersion, rowCap = null) { return this.getHistoryResource('kills', range, latestVersion, rowCap); }
 
   async applyObservation(body, metadata = {}) {
     const result = this.engine.applyObservation(body, metadata);

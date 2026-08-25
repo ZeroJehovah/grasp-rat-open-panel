@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject, type UIEvent, type WheelEvent } from 'react';
-import { Activity, ArrowDown, CalendarDays, CircleAlert, CircleHelp, Github, Map as MapIcon, Moon, RefreshCw, Rows3, Search, Swords, Sun, Users, X, ZoomIn, ZoomOut } from 'lucide-react';
-import { getCachedResource, getMeta, getResource, getVersion } from './api';
+import { Activity, ArrowDown, CalendarDays, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, CircleAlert, CircleHelp, Github, Map as MapIcon, Moon, RefreshCw, Rows3, Search, Swords, Sun, Users, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { getCachedResource, getMeta, getResource, getVersion, type HistoryPageQuery } from './api';
 import { navigate, routePath, tabPath, useRoute, type PanelRoute, type RouteTab } from './route';
-import type { Kill, MapMetadata, MapPlayer, Message, MetaResponse, Player, PlayerState, ResourceResponse } from './types';
+import type { HistoryFilterOptions, HistoryPagination, Kill, MapMetadata, MapPlayer, Message, MetaResponse, Player, PlayerState, ResourceResponse } from './types';
 
 const THEME_KEY = 'grasp-rat:theme';
 const MAP_THRESHOLD_KEY = 'grasp-rat:map-drop-threshold';
@@ -10,6 +10,19 @@ const PLAYER_SORT_KEY = 'grasp-rat:player-sort';
 const KILL_THRESHOLD_KEY = 'grasp-rat:kill-drop-threshold';
 const ONLY_CHAT_KEY = 'grasp-rat:only-chat';
 const ONLY_ONLINE_PLAYERS_KEY = 'grasp-rat:only-online-players';
+const HISTORY_PAGE_SIZE_KEY = 'grasp-rat:history-page-size';
+
+// 后端只接受这三档；页大小进缓存键，任意值等于让同一份数据按用户输入无限增殖缓存条目。
+const HISTORY_PAGE_SIZES = [100, 500, 1000] as const;
+const DEFAULT_HISTORY_PAGE_SIZE = 500;
+// 阈值滑块每动一格都发请求会打出几十个 URL，全部落在边缘缓存里还全是一次性的。
+// 停手之后再查一次。
+const DROP_THRESHOLD_COMMIT_MS = 400;
+
+function storageHistoryPageSize(): number {
+  const saved = Number(localStorage.getItem(HISTORY_PAGE_SIZE_KEY));
+  return HISTORY_PAGE_SIZES.includes(saved as typeof HISTORY_PAGE_SIZES[number]) ? saved : DEFAULT_HISTORY_PAGE_SIZE;
+}
 
 const RANGE_LABELS: Record<string, string> = {
   yesterday: '昨天',
@@ -123,32 +136,83 @@ function dropThresholdFromSliderValue(value: number): number {
   return normalizeDropThreshold(value - 1);
 }
 
-function DropThresholdSlider({ value, ariaLabel, onChange }: { value: number; ariaLabel: string; onChange: (value: number) => void }) {
+// commitDelayMs > 0 时滑块自己维护草稿值，停手 delay 之后才把结果交出去。实时页仍然
+// 即时生效（本地过滤，没有请求成本），历史页用它避免每动一格就打一个新的分页请求。
+function DropThresholdSlider({ value, ariaLabel, onChange, commitDelayMs = 0 }: { value: number; ariaLabel: string; onChange: (value: number) => void; commitDelayMs?: number }) {
+  const [draft, setDraft] = useState(value);
+  const timer = useRef<number | null>(null);
+  useEffect(() => { setDraft(value); }, [value]);
+  useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
+  const commit = (next: number) => {
+    setDraft(next);
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    if (commitDelayMs <= 0) { onChange(next); return; }
+    timer.current = window.setTimeout(() => { timer.current = null; onChange(next); }, commitDelayMs);
+  };
   const handleWheel = (event: WheelEvent<HTMLElement>) => {
     if (event.deltaY === 0) return;
     event.preventDefault();
-    onChange(nextDropThreshold(value, event.deltaY < 0 ? 1 : -1));
+    commit(nextDropThreshold(draft, event.deltaY < 0 ? 1 : -1));
   };
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
       event.preventDefault();
-      onChange(nextDropThreshold(value, -1));
+      commit(nextDropThreshold(draft, -1));
     } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
       event.preventDefault();
-      onChange(nextDropThreshold(value, 1));
+      commit(nextDropThreshold(draft, 1));
     } else if (event.key === 'Home') {
       event.preventDefault();
-      onChange(DROP_THRESHOLD_MIN);
+      commit(DROP_THRESHOLD_MIN);
     } else if (event.key === 'End') {
       event.preventDefault();
-      onChange(DROP_THRESHOLD_MAX);
+      commit(DROP_THRESHOLD_MAX);
     }
   };
   const handlePointerEnd = (event: MouseEvent<HTMLElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    if (event.clientX >= rect.right - 4 || Number(event.currentTarget.getAttribute('value')) >= DROP_THRESHOLD_MAX - DROP_THRESHOLD_STEP + DROP_THRESHOLD_MIN) onChange(DROP_THRESHOLD_MAX);
+    if (event.clientX >= rect.right - 4 || Number(event.currentTarget.getAttribute('value')) >= DROP_THRESHOLD_MAX - DROP_THRESHOLD_STEP + DROP_THRESHOLD_MIN) commit(DROP_THRESHOLD_MAX);
   };
-  return <label className="drop-threshold-control" title="拖动滑块或悬停后滚动鼠标滚轮调整 Drop 阈值"><span>Drop ≥</span><input className="drop-threshold-slider" type="range" min={DROP_THRESHOLD_MIN} max={DROP_THRESHOLD_MAX} step={DROP_THRESHOLD_STEP} value={dropSliderValue(value)} aria-label={ariaLabel} aria-valuemin={DROP_THRESHOLD_MIN} aria-valuemax={DROP_THRESHOLD_MAX} aria-valuenow={value} aria-valuetext={displayNumber(value)} onChange={event => onChange(dropThresholdFromSliderValue(Number(event.currentTarget.value)))} onKeyDown={handleKeyDown} onClick={handlePointerEnd} onWheel={handleWheel} /><output className="drop-threshold-value">{displayNumber(value)}</output></label>;
+  return <label className="drop-threshold-control" title="拖动滑块或悬停后滚动鼠标滚轮调整 Drop 阈值"><span>Drop ≥</span><input className="drop-threshold-slider" type="range" min={DROP_THRESHOLD_MIN} max={DROP_THRESHOLD_MAX} step={DROP_THRESHOLD_STEP} value={dropSliderValue(draft)} aria-label={ariaLabel} aria-valuemin={DROP_THRESHOLD_MIN} aria-valuemax={DROP_THRESHOLD_MAX} aria-valuenow={draft} aria-valuetext={displayNumber(draft)} onChange={event => commit(dropThresholdFromSliderValue(Number(event.currentTarget.value)))} onKeyDown={handleKeyDown} onClick={handlePointerEnd} onWheel={handleWheel} /><output className="drop-threshold-value">{displayNumber(draft)}</output></label>;
+}
+
+interface HistoryPageState {
+  pageSize: number;
+  page: number | 'last';
+  minDrop: number;
+  users: number[];
+}
+
+// 只有历史聊天和历史击杀走后端分页；玩家页返回的是排名候选，本来就只有几十行。
+function historyPageQuery(scope: PanelRoute['scope'], tab: RouteTab, state: HistoryPageState): HistoryPageQuery | null {
+  if (scope !== 'history') return null;
+  if (tab === 'chat') return { pageSize: state.pageSize, page: state.page };
+  if (tab === 'kills') return { pageSize: state.pageSize, page: state.page, minDrop: state.minDrop, users: state.users };
+  return null;
+}
+
+interface PageControl {
+  state: HistoryPageState;
+  pagination: HistoryPagination | null;
+  update: (patch: Partial<HistoryPageState>) => void;
+}
+
+function Pager({ control }: { control: PageControl }) {
+  // 页号显示用服务端回的实际页号：本地状态可能还是 'last'，也可能因为过滤条件变化被夹过。
+  const page = control.pagination?.page ?? 1;
+  const totalPages = control.pagination?.totalPages ?? 1;
+  const total = control.pagination?.total ?? null;
+  return <div className="pager">
+    <label className="pager-size">每页<select value={control.state.pageSize} onChange={event => control.update({ pageSize: Number(event.currentTarget.value), page: 'last' })} aria-label="每页条数">{HISTORY_PAGE_SIZES.map(size => <option key={size} value={size}>{size}</option>)}</select></label>
+    <span className="pager-total">{total === null ? '--' : `共 ${displayNumber(total)} 条`}</span>
+    <div className="pager-buttons">
+      <button type="button" className="pager-button" disabled={page <= 1} onClick={() => control.update({ page: 1 })} aria-label="第一页" title="第一页"><ChevronsLeft size={13} /></button>
+      <button type="button" className="pager-button" disabled={page <= 1} onClick={() => control.update({ page: page - 1 })} aria-label="上一页" title="上一页"><ChevronLeft size={13} /></button>
+      <span className="pager-position">{displayNumber(page)} / {displayNumber(totalPages)}</span>
+      <button type="button" className="pager-button" disabled={page >= totalPages} onClick={() => control.update({ page: page + 1 })} aria-label="下一页" title="下一页"><ChevronRight size={13} /></button>
+      <button type="button" className="pager-button" disabled={page >= totalPages} onClick={() => control.update({ page: 'last' })} aria-label="最后一页" title="最后一页"><ChevronsRight size={13} /></button>
+    </div>
+  </div>;
 }
 
 function resourceKey(route: PanelRoute): string {
@@ -165,9 +229,13 @@ interface ResourceQueryState {
   updatedAt: string | null;
 }
 
-function useResourceQuery(route: PanelRoute): ResourceQueryState {
+function useResourceQuery(route: PanelRoute, page: HistoryPageQuery | null): ResourceQueryState {
   const [state, setState] = useState<ResourceQueryState>({ resource: null, loading: true, error: null, versionError: null, updatedAt: null });
   const key = resourceKey(route);
+  // 翻页和调阈值只换分页参数，不换标签：这时留着上一页的数据比闪一次"正在连接"更好，
+  // 但换标签必须清空，否则击杀表会先拿到聊天资源渲染一帧空表。
+  const pageKey = JSON.stringify(page);
+  const lastKey = useRef<string | null>(null);
 
   useEffect(() => {
     if (route.scope === 'history' && (!route.from || !route.to)) {
@@ -176,9 +244,11 @@ function useResourceQuery(route: PanelRoute): ResourceQueryState {
     }
     const controller = new AbortController();
     let disposed = false;
-    const cached = getCachedResource(route.scope, route.tab, route.scope === 'history' ? `${route.from}:${route.to}` : 'latest');
+    const cached = getCachedResource(route.scope, route.tab, route.scope === 'history' ? `${route.from}:${route.to}` : 'latest', page);
+    const sameRoute = lastKey.current === key;
+    lastKey.current = key;
     let currentToken = cached?.versionToken || null;
-    setState({ resource: cached, loading: !cached, error: null, versionError: null, updatedAt: cached?.generatedAt || null });
+    setState(current => ({ resource: cached || (sameRoute ? current.resource : null), loading: !cached, error: null, versionError: null, updatedAt: cached?.generatedAt || (sameRoute ? current.updatedAt : null) }));
 
     const loadRealtime = async () => {
       let version;
@@ -206,7 +276,7 @@ function useResourceQuery(route: PanelRoute): ResourceQueryState {
 
     const loadHistory = async () => {
       try {
-        const next = await getResource('history', route.tab as 'chat' | 'players' | 'kills', { from: route.from!, to: route.to! }, controller.signal);
+        const next = await getResource('history', route.tab as 'chat' | 'players' | 'kills', { from: route.from!, to: route.to!, page }, controller.signal);
         if (!disposed) setState({ resource: next, loading: false, error: null, versionError: null, updatedAt: next.generatedAt });
       } catch (error) {
         if (!disposed && (error as Error).name !== 'AbortError') setState(current => ({ ...current, loading: false, error: error instanceof Error ? error.message : String(error) }));
@@ -221,7 +291,8 @@ function useResourceQuery(route: PanelRoute): ResourceQueryState {
     }
     void loadHistory();
     return () => { disposed = true; controller.abort(); };
-  }, [key, route.scope, route.tab, route.from, route.to]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, pageKey, route.scope, route.tab, route.from, route.to]);
 
   return state;
 }
@@ -342,7 +413,7 @@ function useAutoBottom(ref: RefObject<HTMLElement>, contentKey: string, resetKey
   };
 }
 
-function ChatPanel({ messages }: { messages: Message[] }) {
+function ChatPanel({ messages, page }: { messages: Message[]; page: PageControl | null }) {
   const [onlyChat, setOnlyChat] = useState(() => localStorage.getItem(ONLY_CHAT_KEY) === 'true');
   const [filterVersion, setFilterVersion] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -372,7 +443,7 @@ function ChatPanel({ messages }: { messages: Message[] }) {
   const contentKey = rows.map(row => row.kind === 'kill-summary' ? row.key : `${row.key}:${row.message.text}`).join('|');
   const onScroll = useAutoBottom(scrollRef, contentKey, filterVersion);
   return <section className="chat-page tab-panel panel-block">
-    <PanelHead title="聊天记录" actions={<label className="switch-label"><input type="checkbox" checked={onlyChat} onChange={event => { const next = event.target.checked; setOnlyChat(next); localStorage.setItem(ONLY_CHAT_KEY, String(next)); setFilterVersion(value => value + 1); }} /><span className="switch" />仅看聊天</label>} />
+    <PanelHead title="聊天记录" actions={<><label className="switch-label"><input type="checkbox" checked={onlyChat} onChange={event => { const next = event.target.checked; setOnlyChat(next); localStorage.setItem(ONLY_CHAT_KEY, String(next)); setFilterVersion(value => value + 1); }} /><span className="switch" />仅看聊天</label>{page && <Pager control={page} />}</>} />
     <div className="panel-body"><div className="chat-list" ref={scrollRef} onScroll={onScroll} aria-label="聊天记录滚动区">{rows.length === 0 ? <EmptyState text="这个范围还没有消息" /> : rows.map(row => {
       if (row.kind === 'kill-summary') return <div className="chat-row kill-summary" key={row.key}><span>{row.count}条击杀记录已折叠</span></div>;
       const isKill = row.message.kind.toLowerCase() === 'kill';
@@ -580,22 +651,43 @@ function killPosition(kill: Kill): { x: number | null; y: number | null } {
   return evidence ? { x: evidence.x, y: evidence.y } : { x: null, y: null };
 }
 
-function KillTable({ kills, map }: { kills: Kill[]; map: MapMetadata }) {
-  const [threshold, setThreshold] = useState(() => storageDropThreshold(KILL_THRESHOLD_KEY));
-  const [selected, setSelected] = useState<number[]>([]);
+// 历史页的阈值和玩家筛选是分页接口的入参，行由后端裁剪；实时页的数据本来就只有当前
+// 快照那一份，继续在本地过滤，不必为了统一而多跑一趟网络。
+function KillTable({ kills, map, page, filterOptions }: { kills: Kill[]; map: MapMetadata; page: PageControl | null; filterOptions: HistoryFilterOptions | null }) {
+  const [localThreshold, setLocalThreshold] = useState(() => storageDropThreshold(KILL_THRESHOLD_KEY));
+  const [localSelected, setLocalSelected] = useState<number[]>([]);
   const [filterVersion, setFilterVersion] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const overThreshold = useMemo(() => kills.filter(kill => { const amount = kill.drop?.amount; return amount !== null && amount !== undefined && amount >= threshold; }), [kills, threshold]);
+  const threshold = page ? page.state.minDrop : localThreshold;
+  const selected = page ? page.state.users : localSelected;
+  const overThreshold = useMemo(() => page ? kills : kills.filter(kill => { const amount = kill.drop?.amount; return amount !== null && amount !== undefined && amount >= threshold; }), [kills, page, threshold]);
   const namesById = useMemo(() => new Map(kills.flatMap(kill => [[kill.killer_user_id, kill.killer_name], [kill.victim_user_id, kill.victim_name]]).filter(([id]) => id !== null && id !== undefined) as [number, string | null][]), [kills]);
   const options = useMemo(() => {
+    // 分页模式下候选表必须由后端给：本页之外的玩家在本地根本看不到。
+    if (page) return (filterOptions?.players || []).map(player => [player.userId, player.name] as [number, string | null]);
     const ids = new Set<number>(selected);
     overThreshold.forEach(kill => [kill.killer_user_id, kill.victim_user_id].forEach(id => { if (id !== null && id !== undefined) ids.add(Number(id)); }));
     return Array.from(ids, id => [id, namesById.get(id) || null] as [number, string | null]).sort((a, b) => String(a[1] || a[0]).localeCompare(String(b[1] || b[0]), 'zh-Hans-u-co-pinyin'));
-  }, [namesById, overThreshold, selected]);
-  const filtered = useMemo(() => overThreshold.slice().filter(kill => selected.length === 0 || selected.includes(Number(kill.killer_user_id)) || selected.includes(Number(kill.victim_user_id))).sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || ''))), [overThreshold, selected]);
+  }, [filterOptions, namesById, overThreshold, page, selected]);
+  const filtered = useMemo(() => overThreshold.slice().filter(kill => page || selected.length === 0 || selected.includes(Number(kill.killer_user_id)) || selected.includes(Number(kill.victim_user_id))).sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || ''))), [overThreshold, page, selected]);
   const onScroll = useAutoBottom(scrollRef, filtered.map(kill => `${kill.kill_id || kill.killId}:${kill.event_at || kill.eventAt}`).join('|'), filterVersion);
-  const updateThreshold = (next: number) => { setThreshold(next); localStorage.setItem(KILL_THRESHOLD_KEY, String(next)); setFilterVersion(current => current + 1); };
-  const toggleSelected = (id: number) => { setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]); setFilterVersion(current => current + 1); };
+  const updateThreshold = (next: number) => {
+    localStorage.setItem(KILL_THRESHOLD_KEY, String(next));
+    setFilterVersion(current => current + 1);
+    // 阈值变了总行数也变了，页号必须回到最后一页，否则会停在一个已经不存在的页上。
+    if (page) return page.update({ minDrop: next, page: 'last' });
+    setLocalThreshold(next);
+  };
+  const toggleSelected = (id: number) => {
+    setFilterVersion(current => current + 1);
+    if (page) return page.update({ users: page.state.users.includes(id) ? page.state.users.filter(value => value !== id) : [...page.state.users, id], page: 'last' });
+    setLocalSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]);
+  };
+  const clearSelected = () => {
+    setFilterVersion(current => current + 1);
+    if (page) return page.update({ users: [], page: 'last' });
+    setLocalSelected([]);
+  };
   const nameCell = (id: number | null | undefined, name: string | null | undefined) => {
     const numeric = id === null || id === undefined ? null : Number(id);
     if (numeric === null || !Number.isFinite(numeric)) return <td>{name || '未知'}</td>;
@@ -604,7 +696,7 @@ function KillTable({ kills, map }: { kills: Kill[]; map: MapMetadata }) {
     return <td><button type="button" className={active ? 'player-filter-link active' : 'player-filter-link'} onClick={() => toggleSelected(numeric)} title={active ? `取消筛选 ${label}` : `只看 ${label}`}>{label}</button></td>;
   };
   return <section className="kill-panel tab-panel panel-block">
-    <PanelHead title="击杀明细" actions={<><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} /><details className="player-filter"><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{options.length === 0 ? <p className="player-options-empty">没有符合阈值的玩家</p> : options.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(id)} onChange={() => toggleSelected(id)} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={() => { setSelected([]); setFilterVersion(current => current + 1); }}><X size={13} />清除</button>}</>} />
+    <PanelHead title="击杀明细" actions={<><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} commitDelayMs={page ? DROP_THRESHOLD_COMMIT_MS : 0} /><details className="player-filter"><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{options.length === 0 ? <p className="player-options-empty">没有符合阈值的玩家</p> : options.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(id)} onChange={() => toggleSelected(id)} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={clearSelected}><X size={13} />清除</button>}{page && <Pager control={page} />}</>} />
     <div className="panel-body"><div className="table-shell kill-scroll" ref={scrollRef} onScroll={onScroll} aria-label="击杀表格滚动区"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>置信度</th><th>坐标</th><th>相对中心点</th><th className="numeric-head">掉落</th></tr></thead><tbody>{filtered.length === 0 ? <tr><td colSpan={8}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill); return <tr key={kill.kill_id || kill.killId || index}><td><time>{formatTime(kill.event_at || kill.eventAt)}</time></td>{nameCell(kill.killer_user_id, kill.killer_name)}{nameCell(kill.victim_user_id, kill.victim_name)}<td><span className={`kill-type ${type === '活跃' ? 'active' : type === '挂机' ? 'idle' : 'unknown'}`}>{type}</span></td><td><span className={`confidence ${kill.confidence}`}>{kill.confidence || 'unknown'}</span></td><PositionCells x={position.x} y={position.y} map={map} /><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></div>
   </section>;
 }
@@ -623,19 +715,19 @@ function PlayersPanel({ players, map, scope }: { players: Player[]; map: MapMeta
   </section>;
 }
 
-function ResourceContent({ route, meta, resource }: { route: PanelRoute; meta: MetaResponse; resource: ResourceResponse }) {
-  if (route.tab === 'chat') return <ChatPanel messages={resource.messages || []} />;
+function ResourceContent({ route, meta, resource, page }: { route: PanelRoute; meta: MetaResponse; resource: ResourceResponse; page: PageControl | null }) {
+  if (route.tab === 'chat') return <ChatPanel messages={resource.messages || []} page={page} />;
   if (route.tab === 'map') return <MapView players={(resource.players || []) as MapPlayer[]} map={resource.map || meta.map} />;
   if (route.tab === 'players') return <PlayersPanel players={(resource.players || []) as Player[]} map={meta.map} scope={route.scope} />;
-  return <KillTable kills={resource.kills || []} map={meta.map} />;
+  return <KillTable kills={resource.kills || []} map={meta.map} page={page} filterOptions={resource.filterOptions || null} />;
 }
 
 function Footer() {
   return <footer className="footer"><span>GRASP RAT / OBSERVATION SURFACE</span><div><a href="https://github.com/ZeroJehovah/grasp-rat-open-panel" target="_blank" rel="noopener noreferrer"><Github size={14} />GitHub</a><a href="https://grasp-rat-game.h-e.top/" target="_blank" rel="noopener noreferrer"><Activity size={14} />游戏主页</a><a href="https://linux.do/t/topic/2290514" target="_blank" rel="noopener noreferrer"><Search size={14} />讨论帖</a></div></footer>;
 }
 
-function MainPanel({ route, meta, query }: { route: PanelRoute; meta: MetaResponse; query: ResourceQueryState }) {
-  return <main className="main-grid"><TabMenu route={route} /><section className="data-viewport"><StatusBar meta={meta} query={query} route={route} />{query.resource ? <ResourceContent route={route} meta={meta} resource={query.resource} /> : query.loading ? <main className="resource-state"><RefreshCw className="spin" size={20} /><span>正在连接观测数据…</span></main> : <main className="resource-state"><CircleAlert size={20} /><span>当前标签暂无可显示的数据</span></main>}</section></main>;
+function MainPanel({ route, meta, query, page }: { route: PanelRoute; meta: MetaResponse; query: ResourceQueryState; page: PageControl | null }) {
+  return <main className="main-grid"><TabMenu route={route} /><section className="data-viewport"><StatusBar meta={meta} query={query} route={route} />{query.resource ? <ResourceContent route={route} meta={meta} resource={query.resource} page={page} /> : query.loading ? <main className="resource-state"><RefreshCw className="spin" size={20} /><span>正在连接观测数据…</span></main> : <main className="resource-state"><CircleAlert size={20} /><span>当前标签暂无可显示的数据</span></main>}</section></main>;
 }
 
 export default function App() {
@@ -645,12 +737,27 @@ export default function App() {
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem(THEME_KEY, theme); }, [theme]);
   useEffect(() => { const controller = new AbortController(); getMeta(controller.signal).then(setMeta).catch(error => { if (error.name !== 'AbortError') setMetaError(error.message); }); return () => controller.abort(); }, []);
   const route = useRoute(meta ? defaultHistoryRange(meta) : null);
-  const query = useResourceQuery(route);
+  // 分页状态放在 App 里：它要同时喂给取数的 hook 和渲染表格的组件，放在表格里就没法参与请求。
+  const [pageState, setPageState] = useState<HistoryPageState>(() => ({ pageSize: storageHistoryPageSize(), page: 'last', minDrop: storageDropThreshold(KILL_THRESHOLD_KEY), users: [] }));
+  const rangeKey = `${route.scope}:${route.tab}:${route.from || ''}:${route.to || ''}`;
+  // 换标签或换区间之后页号和已勾选的人都失效了；页大小和阈值是用户偏好，跟着走。
+  useEffect(() => { setPageState(current => ({ ...current, page: 'last', users: [] })); }, [rangeKey]);
+  const pageQuery = useMemo(() => historyPageQuery(route.scope, route.tab, pageState), [route.scope, route.tab, pageState]);
+  const query = useResourceQuery(route, pageQuery);
+  const pageControl = useMemo<PageControl | null>(() => pageQuery === null ? null : {
+    state: pageState,
+    pagination: query.resource?.pagination || null,
+    update: patch => setPageState(current => {
+      const next = { ...current, ...patch };
+      if (patch.pageSize !== undefined) localStorage.setItem(HISTORY_PAGE_SIZE_KEY, String(patch.pageSize));
+      return next;
+    })
+  }, [pageQuery, pageState, query.resource]);
   useEffect(() => {
     const scope = route.scope === 'realtime' ? '实时' : '历史';
     const tab = route.tab === 'chat' ? '聊天' : route.tab === 'map' ? '地图' : route.tab === 'players' ? '玩家' : '击杀';
     document.title = `${scope}${tab} · Grasp Rat Open Panel`;
   }, [route.scope, route.tab]);
   if (metaError && !meta) return <div className="app-shell"><Banner route={route} theme={theme} onTheme={() => setTheme(value => value === 'light' ? 'dark' : 'light')} /><main className="resource-state"><CircleAlert size={20} /><span>元数据加载失败：{metaError}</span></main><Footer /></div>;
-  return <div className={route.scope === 'history' ? 'app-shell has-history' : 'app-shell'}><Banner route={route} theme={theme} onTheme={() => setTheme(value => value === 'light' ? 'dark' : 'light')} />{meta && route.scope === 'history' && <HistoryRangeControls meta={meta} route={route} />}{meta ? <MainPanel route={route} meta={meta} query={query} /> : <main className="resource-state"><RefreshCw className="spin" size={20} /><span>正在连接观测数据…</span></main>}<Footer /></div>;
+  return <div className={route.scope === 'history' ? 'app-shell has-history' : 'app-shell'}><Banner route={route} theme={theme} onTheme={() => setTheme(value => value === 'light' ? 'dark' : 'light')} />{meta && route.scope === 'history' && <HistoryRangeControls meta={meta} route={route} />}{meta ? <MainPanel route={route} meta={meta} query={query} page={pageControl} /> : <main className="resource-state"><RefreshCw className="spin" size={20} /><span>正在连接观测数据…</span></main>}<Footer /></div>;
 }

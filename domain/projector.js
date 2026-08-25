@@ -781,7 +781,7 @@ class ProjectionEngine {
     // survive this server-side selection so a frontend threshold cannot hide
     // a stamina-only candidate.
     return views.filter(view => {
-      const tired = view.state?.stamina1d !== null && view.state?.stamina1dLimit !== null && view.state.stamina1d < view.state.stamina1dLimit;
+      const tired = Boolean(view.state && view.state.stamina1d !== null && view.state.stamina1dLimit !== null && view.state.stamina1d < view.state.stamina1dLimit);
       return view.online && ((view.drop !== null && view.drop >= 1) || tired);
     });
   }

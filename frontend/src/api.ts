@@ -3,6 +3,15 @@ import type { MetaResponse, ResourceResponse } from './types';
 type RealtimeResource = 'chat' | 'map' | 'players' | 'kills';
 type HistoryResource = 'chat' | 'players' | 'kills';
 
+// 后端分页/过滤参数。后端按 (区间, 页, 过滤条件) 缓存整页响应，所以这里必须把它们
+// 一并算进本地缓存键和 If-None-Match 键，否则换一页会拿回上一页的 body。
+export interface HistoryPageQuery {
+  pageSize?: number | null;
+  page?: number | 'last' | null;
+  minDrop?: number | null;
+  users?: number[] | null;
+}
+
 interface ConditionalEntry {
   etag: string;
   value: unknown;
@@ -59,8 +68,19 @@ function realtimeKey(resource: RealtimeResource, version: string | null): string
   return `${resource}:${version || 'latest'}`;
 }
 
-function historyKey(resource: HistoryResource, from: string, to: string): string {
-  return `${resource}:${from}:${to}`;
+// 参数顺序固定、用户 id 排序：同一组条件只能对应一个键，否则本地缓存和边缘缓存都会分裂。
+export function historyQuerySuffix(page?: HistoryPageQuery | null): string {
+  if (!page) return '';
+  const params: string[] = [];
+  if (page.pageSize) params.push(`pageSize=${page.pageSize}`);
+  if (page.page) params.push(`page=${page.page}`);
+  if (page.minDrop !== null && page.minDrop !== undefined) params.push(`minDrop=${page.minDrop}`);
+  if (page.users && page.users.length > 0) params.push(`users=${page.users.slice().sort((left, right) => left - right).join(',')}`);
+  return params.length === 0 ? '' : `&${params.join('&')}`;
+}
+
+function historyKey(resource: HistoryResource, from: string, to: string, page?: HistoryPageQuery | null): string {
+  return `${resource}:${from}:${to}${historyQuerySuffix(page)}`;
 }
 
 async function getRealtimeResource(resource: RealtimeResource, version: string | null, signal?: AbortSignal): Promise<ResourceResponse> {
@@ -71,11 +91,11 @@ async function getRealtimeResource(resource: RealtimeResource, version: string |
   return value;
 }
 
-async function getHistoryResource(resource: HistoryResource, from: string, to: string, signal?: AbortSignal): Promise<ResourceResponse> {
-  const key = historyKey(resource, from, to);
+async function getHistoryResource(resource: HistoryResource, from: string, to: string, page?: HistoryPageQuery | null, signal?: AbortSignal): Promise<ResourceResponse> {
+  const key = historyKey(resource, from, to, page);
   const cached = historyCache.get(key);
   if (cached) return cached;
-  const value = await getJson<ResourceResponse>(`/api/v1/history/${resource}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, signal, key);
+  const value = await getJson<ResourceResponse>(`/api/v1/history/${resource}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${historyQuerySuffix(page)}`, signal, key);
   historyCache.set(key, value);
   trimCache(historyCache, HISTORY_CACHE_LIMIT);
   return value;
@@ -86,18 +106,21 @@ export function getRealtimeMap(version: string | null, signal?: AbortSignal) { r
 export function getRealtimePlayers(version: string | null, signal?: AbortSignal) { return getRealtimeResource('players', version, signal); }
 export function getRealtimeKills(version: string | null, signal?: AbortSignal) { return getRealtimeResource('kills', version, signal); }
 
-export function getHistoryChat(from: string, to: string, signal?: AbortSignal) { return getHistoryResource('chat', from, to, signal); }
-export function getHistoryPlayers(from: string, to: string, signal?: AbortSignal) { return getHistoryResource('players', from, to, signal); }
-export function getHistoryKills(from: string, to: string, signal?: AbortSignal) { return getHistoryResource('kills', from, to, signal); }
+export function getHistoryChat(from: string, to: string, page?: HistoryPageQuery | null, signal?: AbortSignal) { return getHistoryResource('chat', from, to, page, signal); }
+export function getHistoryPlayers(from: string, to: string, signal?: AbortSignal) { return getHistoryResource('players', from, to, null, signal); }
+export function getHistoryKills(from: string, to: string, page?: HistoryPageQuery | null, signal?: AbortSignal) { return getHistoryResource('kills', from, to, page, signal); }
 
-export function getResource(scope: 'realtime' | 'history', resource: RealtimeResource, argument: string | null | { from: string; to: string }, signal?: AbortSignal): Promise<ResourceResponse> {
+type HistoryArgument = { from: string; to: string; page?: HistoryPageQuery | null };
+
+export function getResource(scope: 'realtime' | 'history', resource: RealtimeResource, argument: string | null | HistoryArgument, signal?: AbortSignal): Promise<ResourceResponse> {
   if (scope === 'realtime') return getRealtimeResource(resource, argument as string | null, signal);
-  return getHistoryResource(resource as HistoryResource, (argument as { from: string; to: string }).from, (argument as { from: string; to: string }).to, signal);
+  const history = argument as HistoryArgument;
+  return getHistoryResource(resource as HistoryResource, history.from, history.to, history.page || null, signal);
 }
 
-export function getCachedResource(scope: 'realtime' | 'history', resource: string, key: string): ResourceResponse | null {
+export function getCachedResource(scope: 'realtime' | 'history', resource: string, key: string, page?: HistoryPageQuery | null): ResourceResponse | null {
   if (scope === 'realtime') return realtimeCache.get(`${resource}:${key || 'latest'}`) || null;
-  return historyCache.get(`${resource}:${key}`) || null;
+  return historyCache.get(`${resource}:${key}${historyQuerySuffix(page)}`) || null;
 }
 
 export function clearCaches(): void {

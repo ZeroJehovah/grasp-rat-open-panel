@@ -135,6 +135,19 @@ export interface HistoryResponse {
   stats: unknown[];
 }
 
+export interface HistoryPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+}
+
+export interface HistoryFilterOptions {
+  players: { userId: number; name: string | null }[];
+}
+
 export interface ResourceResponse {
   scope: 'realtime' | 'history';
   resource: 'chat' | 'map' | 'players' | 'kills';
@@ -152,4 +165,6 @@ export interface ResourceResponse {
   players?: Player[] | MapPlayer[];
   messages?: Message[];
   kills?: Kill[];
+  pagination?: HistoryPagination;
+  filterOptions?: HistoryFilterOptions;
 }

@@ -10,6 +10,7 @@ const { ProjectionEngine } = require('../domain/projector');
 const { HISTORY_ROW_LIMITS, PostgresPanelStore } = require('../storage/postgres-store');
 const { collectorHealth } = require('../collector/health');
 const { ResponseCache, TtlMemo, ifNoneMatchSatisfied, negotiateEncoding } = require('./cache');
+const { historyPageCacheKey, parseHistoryPageQuery, sliceHistoryPage } = require('./history-page');
 const { BUSINESS_TIMEZONE, SCHEMA_VERSION, businessDateRange, isDateRangeCovered } = require('../domain/snapshot');
 
 // 缓存键已经表达了失效条件，TTL 只是内存回收和迟到写入的上界。已结束的日期共享一条
@@ -99,6 +100,17 @@ function historyLimitError(resource, limit) {
   error.resource = resource;
   error.limit = limit;
   return error;
+}
+
+function invalidPaginationReply(reply, resource, message) {
+  return reply.code(400).header('Cache-Control', 'no-store').send({
+    error: 'invalid_pagination',
+    resource,
+    message,
+    generatedAt: new Date().toISOString(),
+    timezone: BUSINESS_TIMEZONE,
+    schemaVersion: SCHEMA_VERSION
+  });
 }
 
 function historyLimitReply(reply, resource, limit) {
@@ -264,15 +276,23 @@ async function buildServer(options = {}) {
     return { range, closed, token: versionTokenOf(latest), latest };
   }
 
-  function historyCacheFields(plan, resource) {
+  function historyCacheFields(plan, resource, pageRequest = null) {
     return {
-      key: cacheKey(`history:${resource}:${plan.range.from}:${plan.range.to}:${plan.closed ? 'closed' : plan.token || 'none'}`),
+      key: cacheKey(`history:${resource}:${plan.range.from}:${plan.range.to}:${plan.closed ? 'closed' : plan.token || 'none'}${historyPageCacheKey(pageRequest)}`),
       ttlMs: plan.closed ? HISTORY_CLOSED_TTL_MS : HISTORY_OPEN_TTL_MS,
       cacheControl: plan.closed ? HISTORY_CLOSED_CACHE_CONTROL : HISTORY_OPEN_CACHE_CONTROL
     };
   }
 
   app.get('/api/v1/history', async (request, reply) => {
+    // 合并端点不支持分页：它一次返回所有资源，分页参数在这里没有明确语义，静默忽略
+    // 比报错更容易让调用方以为自己拿到了一页。
+    try {
+      parseHistoryPageQuery('all', request.query || {});
+    } catch (error) {
+      if (error?.code === 'invalid_pagination') return invalidPaginationReply(reply, 'all', error.message);
+      throw error;
+    }
     const plan = await historyRangeOrReply(request, reply, null);
     if (!plan) return reply;
     try {
@@ -313,13 +333,23 @@ async function buildServer(options = {}) {
   for (const resource of historyResources) {
     const method = `getHistory${resource[0].toUpperCase()}${resource.slice(1)}`;
     app.get(`/api/v1/history/${resource}`, async (request, reply) => {
+      let pageRequest;
+      try {
+        pageRequest = parseHistoryPageQuery(resource, request.query || {});
+      } catch (error) {
+        if (error?.code === 'invalid_pagination') return invalidPaginationReply(reply, resource, error.message);
+        throw error;
+      }
       const plan = await historyRangeOrReply(request, reply, resource);
       if (!plan) return reply;
       try {
         return await respondCached(request, reply, {
           cache,
-          ...historyCacheFields(plan, resource),
-          build: async () => envelope(await store[method](plan.range, plan.latest), { scope: 'history', resource, from: plan.range.from, to: plan.range.to })
+          ...historyCacheFields(plan, resource, pageRequest),
+          // 过滤和裁剪在这里做而不是在 store 里：store 仍然按天缓存整个区间的行，路由只把
+          // 需要的一页序列化出去。这样按天分片的等价性与分页无关，两种 store 实现也不用
+          // 各写一遍分页逻辑。
+          build: async () => sliceHistoryPage(resource, envelope(await store[method](plan.range, plan.latest, pageRequest?.rowCap || null), { scope: 'history', resource, from: plan.range.from, to: plan.range.to }), pageRequest)
         });
       } catch (error) {
         if (error?.code === 'history_result_limit') return historyLimitReply(reply, error.resource, error.limit);
