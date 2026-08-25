@@ -250,13 +250,23 @@ class ProjectionEngine {
       // A warming-up response may still contain trustworthy rolling message and
       // drop buffers. Keep those object IDs idempotent, and let the entity set
       // advance the displayed current state so realtime reads follow the live
-      // world while it repopulates. Online intervals, the daily baseline and the
-      // base/delta chain stay steady-driven: an incomplete set must never close
-      // an interval or anchor history.
+      // world while it repopulates.
+      //
+      // Quota accounting runs here as well. `external_balance_snapshot` is a
+      // fact about the player carrying it, and an incomplete entity set says
+      // nothing about the players it does contain. Holding these frames back
+      // anchored the daily baseline on the first steady snapshot instead of the
+      // first reading of the day, so everything earned in between vanished:
+      // on 2026-08-26 that was 662 of one player's 1,169.
+      //
+      // Still steady-only: online intervals and the base/delta chain. Those are
+      // the two things that read meaning into a player's absence, so an
+      // incomplete set must never drive them.
       const entitiesByUser = new Map(parseResult.entities.map(entity => [userKey(entity.user_id), entity]));
       const previousStates = this.projectWarmingState(parseResult, version);
       this.projectMessages(parseResult, version, entitiesByUser, previousStates);
       this.projectDrops(parseResult, version, false);
+      this.projectQuota(parseResult, version);
       return { observation, parsed: parseResult, version, status: 'warming_up' };
     }
     this.projectStableVersion(parseResult, version);
@@ -266,8 +276,8 @@ class ProjectionEngine {
   // Display-only projection for an incomplete entity set. `players` and
   // `player_state_current` are what the realtime views render, so they follow
   // the newest snapshot even while the world is still filling up after a reset.
-  // Everything that accounts for time or anchors history is deliberately left
-  // alone: no interval is opened or closed, no daily stat or quota moves, and no
+  // What depends on the set being complete is deliberately left alone: no
+  // interval is opened or closed, no daily kill/death stat moves, and no
   // base/delta row is written. Returns the pre-update states so kill evidence is
   // still resolved against the state that preceded this snapshot.
   projectWarmingState(parsed, version) {
@@ -461,12 +471,12 @@ class ProjectionEngine {
         old.last_observed_at = version.observed_at;
         const oldKill = this.kills.get(messageKey);
         if (oldKill) {
-          const oldEvidence = this.versions.find(item => item.snapshot_id === oldKill.evidence_snapshot_id);
-          // A warming-up event may have been recorded before currentStates was
-          // advanced. Once a steady version arrives, use that new state as the
-          // evidence source so the stored evidence is not permanently tied to
-          // an incomplete snapshot.
-          this.attachKillEvidence(oldKill, oldEvidence?.completeness === 'warming_up' ? this.currentStates : evidenceStates);
+          // Re-resolving only fills fields that are still missing. Handing it
+          // `this.currentStates` here used to "upgrade" warming evidence to the
+          // newest steady state, which for a victim means the state *after*
+          // they respawned — a strictly worse reading than the one taken at
+          // death.
+          this.attachKillEvidence(oldKill, evidenceStates, version);
           this.touchKill(oldKill);
         }
         continue;
@@ -514,7 +524,7 @@ class ProjectionEngine {
           victim_stamina_5s: null,
           victim_stamina_5s_limit: null
         };
-        this.attachKillEvidence(kill, evidenceStates);
+        this.attachKillEvidence(kill, evidenceStates, version);
         if (!kill.evidence_snapshot_id) kill.evidence_snapshot_id = parsed.snapshotId;
         this.kills.set(messageKey, kill);
         this.touchKill(kill);
@@ -524,23 +534,46 @@ class ProjectionEngine {
     }
   }
 
-  attachKillEvidence(kill, evidenceStates) {
+  // Death evidence is a point-in-time reading. `death_drop_coins`, position and
+  // stamina describe the victim as they were just before the kill, and the game
+  // overwrites all three the moment they respawn — so evidence may only be taken
+  // from a snapshot that genuinely precedes the kill, and once a field is
+  // captured it is never rewritten. A later snapshot is more complete, not more
+  // relevant.
+  //
+  // Both halves of that rule were wrong before. Stale state left over from the
+  // previous world was accepted as "steady" evidence, which is how a kill at
+  // tick 3673 was recorded with the 37 coins its victim had been carrying at
+  // 23:59 the night before instead of the 465 they actually dropped.
+  attachKillEvidence(kill, evidenceStates, version) {
     const victim = evidenceStates.get(userKey(kill.victim_user_id));
     const killer = evidenceStates.get(userKey(kill.killer_user_id));
-    let refreshEvidence = false;
-    if (victim) {
-      const previousEvidence = this.versions.find(version => version.snapshot_id === kill.evidence_snapshot_id);
-      const needsStableEvidence = !kill.evidence_snapshot_id || previousEvidence?.completeness !== 'steady';
-      refreshEvidence = needsStableEvidence;
-      if (needsStableEvidence || !kill.victim_position) kill.victim_position = { x: numeric(victim.x), y: numeric(victim.y) };
-      if (needsStableEvidence || kill.victim_stamina_5s === null) kill.victim_stamina_5s = numeric(victim.stamina_5s_remaining_milli);
-      if (needsStableEvidence || kill.victim_stamina_5s_limit === null) kill.victim_stamina_5s_limit = numeric(victim.stamina_5s_limit_milli);
-      if (needsStableEvidence) kill.evidence_snapshot_id = victim.snapshot_id || kill.evidence_snapshot_id;
-      if ((needsStableEvidence || kill.drop === null) && Object.prototype.hasOwnProperty.call(victim, 'death_drop_coins')) {
+    if (victim && this.precedesKill(victim, kill, version)) {
+      if (!kill.victim_position) kill.victim_position = { x: numeric(victim.x), y: numeric(victim.y) };
+      if (kill.victim_stamina_5s === null) kill.victim_stamina_5s = numeric(victim.stamina_5s_remaining_milli);
+      if (kill.victim_stamina_5s_limit === null) kill.victim_stamina_5s_limit = numeric(victim.stamina_5s_limit_milli);
+      if (!kill.evidence_snapshot_id) kill.evidence_snapshot_id = victim.snapshot_id || null;
+      if (kill.drop === null && Object.prototype.hasOwnProperty.call(victim, 'death_drop_coins')) {
         kill.drop = { amount: numeric(victim.death_drop_coins), confidence: 'confirmed', evidence_snapshot_id: victim.snapshot_id || null };
       }
     }
-    if (killer && (!kill.killer_position || refreshEvidence)) kill.killer_position = { x: numeric(killer.x), y: numeric(killer.y) };
+    if (killer && !kill.killer_position && this.precedesKill(killer, kill, version)) {
+      kill.killer_position = { x: numeric(killer.x), y: numeric(killer.y) };
+    }
+  }
+
+  // Ticks restart with the world, so only ticks from the same world generation
+  // are comparable at all. That is what rejects yesterday's leftovers; within a
+  // generation the tick bound rejects anything observed after the kill,
+  // respawned victims included. The calendar day is deliberately not a barrier:
+  // for a kill just after midnight the nearest evidence is usually the 23:59
+  // frame, same generation and a smaller tick.
+  precedesKill(state, kill, version) {
+    if (!state || !state.snapshot_id || !version) return false;
+    if (state.reset_generation !== version.reset_generation) return false;
+    const stateVersion = this.versions.find(item => item.snapshot_id === state.snapshot_id);
+    if (!stateVersion || !Number.isFinite(stateVersion.server_tick) || !Number.isFinite(kill.tick)) return false;
+    return stateVersion.server_tick <= kill.tick;
   }
 
   incrementDailyStat(localDate, id, field) {
@@ -594,11 +627,23 @@ class ProjectionEngine {
     }
     for (const kill of this.kills.values()) {
       if (kill.coin_drop?.confidence === 'confirmed' || kill.server_day !== parsed.serverDay) continue;
-      const candidate = Array.from(this.drops.values()).find(drop => drop.server_day === parsed.serverDay && !drop.system_spawned && drop.created_tick === kill.tick && drop.source_user_id === kill.killer_user_id);
+      // The coins on the ground came out of the victim's pocket, so the drop
+      // object carries the victim's user id. Matching on the killer linked
+      // nothing at all — on 2026-08-26 that was 0 of 56 player drops — and it
+      // also threw away the one piece of evidence that survives when the victim
+      // is missing from the snapshots around their own death.
+      const victimKey = userKey(kill.victim_user_id);
+      const candidate = victimKey === null ? null : Array.from(this.drops.values()).find(drop => drop.server_day === parsed.serverDay && !drop.system_spawned && drop.created_tick === kill.tick && userKey(drop.source_user_id) === victimKey);
       if (candidate) {
         kill.coin_drop = { drop_id: candidate.drop_id, amount: candidate.amount, x: candidate.x, y: candidate.y, confidence: 'confirmed' };
         candidate.kill_event_id = kill.kill_id;
         candidate.confidence = 'confirmed';
+        // The drop object is a direct record of what actually hit the ground,
+        // so it stands in wherever the pre-death reading is missing. Where both
+        // exist they agree (54 of 54 on 2026-08-26).
+        if (kill.drop === null || kill.drop.amount === null) {
+          kill.drop = { amount: numeric(candidate.amount), confidence: 'confirmed', evidence_snapshot_id: candidate.first_seen_snapshot_id || null, drop_id: candidate.drop_id };
+        }
         this.touchKill(kill);
         touchedKeys.add(mapKey(candidate.server_day, candidate.drop_id));
       } else {

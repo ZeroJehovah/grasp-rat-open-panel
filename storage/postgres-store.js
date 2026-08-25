@@ -850,9 +850,25 @@ class PostgresPanelStore {
       await client.query(`INSERT INTO coin_drop_lifecycles (server_day, drop_id, first_seen_snapshot_id, last_seen_snapshot_id, first_seen_at, last_seen_at, disappeared_at, source_user_id, system_spawned, x, y, amount, created_tick, source, confidence, kill_event_id)
         VALUES ($1::date, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (server_day, drop_id) DO UPDATE SET last_seen_snapshot_id = EXCLUDED.last_seen_snapshot_id, last_seen_at = EXCLUDED.last_seen_at, disappeared_at = COALESCE(EXCLUDED.disappeared_at, coin_drop_lifecycles.disappeared_at), kill_event_id = COALESCE(EXCLUDED.kill_event_id, coin_drop_lifecycles.kill_event_id)`, [drop.server_day, drop.drop_id, drop.first_seen_snapshot_id, drop.last_seen_snapshot_id, drop.first_seen_at, drop.last_seen_at, drop.disappeared_at, drop.source_user_id, drop.system_spawned, drop.x, drop.y, drop.amount, drop.created_tick, drop.source, drop.confidence, drop.kill_event_id]);
     }
+    // Quota rows follow the same rule as the display state: they only describe
+    // players this snapshot actually carried, so an incomplete set can still
+    // advance them. Without this the baseline for a day that begins with a
+    // world reset was anchored minutes late and the income earned in between
+    // was lost. `initial_quota` is COALESCE-protected in SQL as well, so the
+    // earliest reading of the day wins even if a later frame is written twice.
+    for (const quota of this.engine.quotaCurrent.values()) {
+      if (quota.quota_day !== parsed.serverDay) continue;
+      if (!this.engine.players.has(String(quota.user_id))) continue;
+      await client.query(`INSERT INTO player_quota_current (user_id, quota_day, initial_quota, quota_value, quota_source, last_snapshot_id, updated_at) VALUES ($1, $2::date, $3, $4, $5, $6, $7) ON CONFLICT (user_id) DO UPDATE SET quota_day = EXCLUDED.quota_day, initial_quota = EXCLUDED.initial_quota, quota_value = EXCLUDED.quota_value, quota_source = EXCLUDED.quota_source, last_snapshot_id = EXCLUDED.last_snapshot_id, updated_at = EXCLUDED.updated_at`, [quota.user_id, quota.quota_day, quota.initial_quota, quota.quota_value, quota.quota_source, quota.last_snapshot_id, quota.updated_at]);
+    }
+    for (const daily of this.engine.dailyQuota.values()) {
+      if (daily.local_date !== parsed.serverDay) continue;
+      if (!this.engine.players.has(String(daily.user_id))) continue;
+      await client.query(`INSERT INTO player_daily_quota (local_date, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id) VALUES ($1::date, $2, $3, $4, $5, $6, $7) ON CONFLICT (local_date, user_id) DO UPDATE SET initial_quota = COALESCE(player_daily_quota.initial_quota, EXCLUDED.initial_quota), closing_quota = EXCLUDED.closing_quota, income = EXCLUDED.income, finalized_at = COALESCE(player_daily_quota.finalized_at, EXCLUDED.finalized_at), source_snapshot_id = EXCLUDED.source_snapshot_id`, [daily.local_date, daily.user_id, daily.initial_quota, daily.closing_quota, daily.income, daily.finalized_at, daily.source_snapshot_id]);
+    }
     // Warming-up messages can mention users that are not in the incomplete
-    // entity set yet. Their daily stats are persisted by the next stable
-    // projection after the corresponding players exist (the FK is deliberate).
+    // entity set yet. Their daily kill/death stats are persisted by the next
+    // stable projection after the players exist (the FK is deliberate).
   }
 }
 

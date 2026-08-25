@@ -80,7 +80,7 @@ function replay(options) {
   // trustworthy balance for that day at all, so their stored row has to be
   // cleared rather than repaired.
   const heldBack = new Set();
-  const summary = { files: files.length, parsed: 0, skipped: 0, zeroReadingsIgnored: 0, firstObservedAt: null, lastObservedAt: null };
+  const summary = { files: files.length, parsed: 0, warming: 0, skipped: 0, zeroReadingsIgnored: 0, firstObservedAt: null, lastObservedAt: null };
   for (const name of files) {
     const observedAt = observedAtFromName(name);
     if (!observedAt) continue;
@@ -88,7 +88,12 @@ function replay(options) {
       observedAt,
       minSteadyEntities: options.minSteadyEntities === null ? undefined : options.minSteadyEntities
     });
-    if (parsed.completeness !== 'steady') { summary.skipped += 1; continue; }
+    // Only `invalid` is skipped. A warming-up response carries fewer entities,
+    // but each entity's own `external_balance_snapshot` is as trustworthy as it
+    // is in a full one — and refusing those frames is exactly how the projector
+    // lost the start-of-day baseline this command exists to repair.
+    if (parsed.completeness === 'invalid') { summary.skipped += 1; continue; }
+    if (parsed.completeness !== 'steady') summary.warming += 1;
     summary.parsed += 1;
     for (const entity of parsed.entities) {
       const uid = entity.user_id === null || entity.user_id === undefined ? null : String(entity.user_id);

@@ -238,17 +238,63 @@ function observation(engine, value, time) {
   assert.strictEqual(kill.victim_stamina_5s, 10000);
 })();
 
+// 回归：死亡证据是一个时点读数。它只能取自确实早于击杀 tick 的快照，而且一旦采到就不再
+// 改写——后来的快照更完整，但离死亡更远。旧逻辑会在下一个稳定版本里把预热期采到的证据
+// "升级"成复活之后的状态，掉落金额也跟着被顶掉。
 (() => {
   const engine = new ProjectionEngine({ minSteadyEntities: 2 });
-  const victim = entity({ user_id: 7, entity_id: 11, name: 'victim', x: 40, y: 50 });
+  const victim = entity({ user_id: 7, entity_id: 11, name: 'victim', x: 40, y: 50, death_drop_coins: 465 });
   const killer = entity({ user_id: 8, entity_id: 12, name: 'killer', x: -10, y: -20 });
+  const respawned = entity({ user_id: 7, entity_id: 11, name: 'victim', x: 0, y: 0, death_drop_coins: 1 });
   const message = { id: 9002, tick: 150, kind: 'kill', user_id: 8, target_user_id: 7, text: 'killer killed victim' };
-  observation(engine, body(100, { entities: [] }, { messages: [message] }), '00:11:00');
-  observation(engine, body(200, { entities: [victim, killer] }, { messages: [message] }), '00:11:30');
-  observation(engine, body(300, { entities: [victim, killer] }, { messages: [message] }), '00:12:00');
+  // 世界刚重启，实体集还不完整，但受害者本人在里面：这就是他死前最后一次读数。
+  const warming = observation(engine, body(100, { entities: [victim] }), '00:11:00');
+  assert.strictEqual(warming.status, 'warming_up');
+  observation(engine, body(200, { entities: [respawned, killer] }, { messages: [message] }), '00:11:30');
   const kill = engine.kills.get('9002');
-  assert.strictEqual(kill.evidence_snapshot_id, engine.versions[1].snapshot_id);
+  assert.strictEqual(kill.drop.amount, 465, '证据要取死前那一帧，不是当前实体集');
   assert.deepStrictEqual(kill.victim_position, { x: 40, y: 50 });
+  assert.strictEqual(kill.evidence_snapshot_id, engine.versions[0].snapshot_id, '证据必须指向击杀之前的那个快照');
+  // 同一条滚动消息再次出现时不许重新取证：tick 200 的状态已经是复活之后了。
+  observation(engine, body(300, { entities: [respawned, killer] }, { messages: [message] }), '00:12:00');
+  assert.strictEqual(engine.kills.get('9002').drop.amount, 465, '复活后的读数不能顶掉死前证据');
+  assert.deepStrictEqual(engine.kills.get('9002').victim_position, { x: 40, y: 50 });
+  assert.strictEqual(engine.kills.get('9002').evidence_snapshot_id, engine.versions[0].snapshot_id);
+})();
+
+// 回归：掉在地上的金币出自受害者的口袋，所以 coin_drops.source_user_id 是受害者而不是
+// 凶手。按凶手匹配一条也对不上，受害者缺席时就连唯一剩下的证据也丢了。
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  const killer = entity({ user_id: 8, entity_id: 12, name: 'killer' });
+  const message = { id: 9020, tick: 150, kind: 'kill', user_id: 8, target_user_id: 7, text: 'killer killed victim' };
+  const drop = { drop_id: 33, source_user_id: 7, system_spawned: false, x: 1, y: 2, amount: 465, created_tick: 150 };
+  observation(engine, body(200, { entities: [killer] }, { messages: [message], coin_drops: [drop] }), '00:15:00');
+  const kill = engine.kills.get('9020');
+  assert.strictEqual(kill.coin_drop.drop_id, 33);
+  assert.strictEqual(kill.coin_drop.confidence, 'confirmed');
+  assert.strictEqual(kill.drop.amount, 465, '受害者不在快照里时，掉落物就是唯一证据');
+  assert.strictEqual(kill.drop.confidence, 'confirmed');
+  assert.strictEqual(engine.drops.get('2026-08-22:33').kill_event_id, '9020');
+  assert.strictEqual(engine.drops.get('2026-08-22:33').confidence, 'confirmed');
+})();
+
+// 回归：预热帧里的 external_balance_snapshot 是这个玩家自己的事实，实体集不完整并不能
+// 说明在里面的人有什么问题。跳过这些帧会把当天基线锚到第一个稳定快照上，中间挣的钱
+// 就凭空消失了。
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 2 });
+  const early = entity({ user_id: 7, entity_id: 11, name: 'a', external_balance_snapshot: 50_000_000 });
+  const later = entity({ user_id: 7, entity_id: 11, name: 'a', external_balance_snapshot: 50_500_000 });
+  const partner = entity({ user_id: 8, entity_id: 12, name: 'b' });
+  const warming = observation(engine, body(10, { entities: [early] }), '00:00:30');
+  assert.strictEqual(warming.status, 'warming_up');
+  assert.strictEqual(engine.quotaCurrent.get('7').initial_quota, 100, '基线必须锚在当天第一次读数上');
+  assert.strictEqual(engine.dailyQuota.get('2026-08-22:7').initial_quota, 100);
+  observation(engine, body(200, { entities: [later, partner] }), '00:05:00');
+  assert.strictEqual(engine.dailyQuota.get('2026-08-22:7').initial_quota, 100);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-22:7').closing_quota, 101);
+  assert.strictEqual(engine.dailyQuota.get('2026-08-22:7').income, 1);
 })();
 
 (() => {
