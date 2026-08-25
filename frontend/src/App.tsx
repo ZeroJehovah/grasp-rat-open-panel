@@ -359,7 +359,7 @@ function HistoryRangeControls({ meta, route }: { meta: MetaResponse; route: Pane
       const available = value === 'custom' || Boolean(meta.presetRanges?.[value]);
       const active = value === 'custom' ? customSelected : meta.presetRanges?.[value]?.from === range.from && meta.presetRanges?.[value]?.to === range.to;
       return <button key={value} className={active ? 'preset active' : 'preset'} onClick={() => setPreset(value)} disabled={!available} title={available ? undefined : '当前没有覆盖该范围的历史数据'}>{RANGE_LABELS[value]}</button>;
-    })}</div>{customSelected && <div className="date-fields"><label>起始日<input type="date" list="available-history-dates" min={meta.earliestDate || undefined} max={latestHistory || undefined} value={range.from} onChange={event => updateDate('from', event.target.value)} /></label><span>→</span><label>结束日<input type="date" list="available-history-dates" min={meta.earliestDate || undefined} max={latestHistory || undefined} value={range.to} onChange={event => updateDate('to', event.target.value)} /></label><datalist id="available-history-dates">{availableHistoryDates.map(date => <option key={date} value={date} />)}</datalist></div>}</div><p className="micro-note">可用历史数据：{meta.earliestDate || '--'} 至 {latestHistory || '--'} · 不包含今天 · {meta.timezone}</p></div>
+    })}</div>{customSelected && <div className="date-fields"><label><input type="date" aria-label="起始日" list="available-history-dates" min={meta.earliestDate || undefined} max={latestHistory || undefined} value={range.from} onChange={event => updateDate('from', event.target.value)} /></label><span>→</span><label><input type="date" aria-label="结束日" list="available-history-dates" min={meta.earliestDate || undefined} max={latestHistory || undefined} value={range.to} onChange={event => updateDate('to', event.target.value)} /></label><datalist id="available-history-dates">{availableHistoryDates.map(date => <option key={date} value={date} />)}</datalist></div>}</div><p className="micro-note">可用历史数据：{meta.earliestDate || '--'} 至 {latestHistory || '--'} · 不包含今天 · {meta.timezone}</p></div>
   </section>;
 }
 
@@ -395,9 +395,13 @@ function PanelHead({ title, tooltip, actions }: { title: string; tooltip?: strin
   </div>;
 }
 
+// 历史页平时不显示状态行：查的是哪个区间上面的范围选择器已经写着，加载状态由数据区自己
+// 显示，而静态历史数据的"更新于"只是这次请求发生的时刻，没有信息量。出错还是要说。
 function StatusBar({ meta, query, route }: { meta: MetaResponse; query: ResourceQueryState; route: PanelRoute }) {
   const resourceLabel = route.tab === 'chat' ? '聊天' : route.tab === 'map' ? '地图' : route.tab === 'players' ? '玩家' : '击杀';
-  return <div className="global-status" role="status">{query.versionError ? <><CircleAlert size={14} />实时版本检查失败：{query.versionError}</> : query.error ? <><CircleAlert size={14} />{resourceLabel}数据暂不可用：{query.error}</> : query.loading ? <><RefreshCw size={14} className="spin" />正在加载{resourceLabel}…</> : <><span className="status-dot" />{route.scope === 'history' ? `历史 ${route.from}—${route.to}` : `服务运行中 · ${meta.timezone}`}{query.updatedAt ? ` · ${formatTime(query.updatedAt)}` : ''}</>}</div>;
+  const alert = query.versionError ? <><CircleAlert size={14} />实时版本检查失败：{query.versionError}</> : query.error ? <><CircleAlert size={14} />{resourceLabel}数据暂不可用：{query.error}</> : null;
+  if (route.scope === 'history') return alert ? <div className="global-status" role="status">{alert}</div> : null;
+  return <div className="global-status" role="status">{alert || (query.loading ? <><RefreshCw size={14} className="spin" />正在加载{resourceLabel}…</> : <><span className="status-dot" />服务运行中 · {meta.timezone}{query.updatedAt ? ` · ${formatTime(query.updatedAt)}` : ''}</>)}</div>;
 }
 
 // 实时页的列表是"最新在下"，所以要黏在底部；历史页分页之后每页都是一个独立的片段，
@@ -429,19 +433,52 @@ function useListScroll(ref: RefObject<HTMLElement>, contentKey: string, resetKey
   };
 }
 
+type ChatRow = { kind: 'message'; message: Message; key: string } | { kind: 'kill-summary'; count: number; key: string };
+
 // 历史页的"仅看聊天"是分页接口的入参：行由后端过滤，本页 100 条就是 100 条聊天。
-// 改造前它是客户端折叠（把连续的击杀播报折成一行摘要），那和分页对不上——聊天只有几条
-// 却因为击杀占了行数而被切成好几页。实时页只有当前快照那一份数据，继续在本地过滤。
-function ChatPanel({ messages, page, loading }: { messages: Message[]; page: PageControl | null; loading: boolean }) {
+// 折叠摘要还在，只是数字换了来源——后端在留下的每条消息上写 folded_before，末页再带一个
+// foldedAfter，前端照着画就行，不必为了数个数把被折掉的几百条击杀也传过来。
+// 实时页只有当前快照那一份数据，继续在本地折叠。
+function chatRows(messages: Message[], onlyChat: boolean, serverFiltered: boolean, foldedAfter: number): ChatRow[] {
+  const sorted = messages.slice().sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || '')));
+  const keyOf = (message: Message, index: number) => `${message.message_id || message.messageId || index}`;
+  if (!onlyChat) return sorted.map((message, index) => ({ kind: 'message', message, key: keyOf(message, index) }));
+  const rows: ChatRow[] = [];
+  const fold = (count: number, at: string) => { if (count > 0) rows.push({ kind: 'kill-summary', count, key: `kill-summary:${at}:${count}` }); };
+  if (serverFiltered) {
+    sorted.forEach((message, index) => {
+      const key = keyOf(message, index);
+      fold(message.folded_before || 0, `before:${key}`);
+      rows.push({ kind: 'message', message, key });
+    });
+    fold(foldedAfter, 'tail');
+    return rows;
+  }
+  let pending = 0;
+  let start = '';
+  sorted.forEach((message, index) => {
+    const key = keyOf(message, index);
+    if (String(message.kind || '').toLowerCase() === 'kill') {
+      if (!start) start = key;
+      pending += 1;
+      return;
+    }
+    fold(pending, start);
+    pending = 0;
+    start = '';
+    rows.push({ kind: 'message', message, key });
+  });
+  fold(pending, start);
+  return rows;
+}
+
+function ChatPanel({ messages, page, loading, foldedAfter }: { messages: Message[]; page: PageControl | null; loading: boolean; foldedAfter: number }) {
   const [localOnlyChat, setLocalOnlyChat] = useState(storageOnlyChat);
   const [filterVersion, setFilterVersion] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const onlyChat = page ? page.state.onlyChat : localOnlyChat;
-  const rows = useMemo(() => {
-    const sorted = messages.slice().sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || '')));
-    return page || !onlyChat ? sorted : sorted.filter(message => String(message.kind || '').toLowerCase() !== 'kill');
-  }, [messages, onlyChat, page]);
-  const contentKey = rows.map((message, index) => `${message.message_id || message.messageId || index}:${message.text}`).join('|');
+  const rows = useMemo(() => chatRows(messages, onlyChat, Boolean(page), foldedAfter), [foldedAfter, messages, onlyChat, page]);
+  const contentKey = rows.map(row => row.kind === 'kill-summary' ? row.key : `${row.key}:${row.message.text}`).join('|');
   const onScroll = useListScroll(scrollRef, contentKey, filterVersion, page ? 'top' : 'bottom');
   // 本地状态始终跟着写：切到另一个范围时 App 会重新读这个偏好，两边不能各记一份。
   const setOnlyChatValue = (next: boolean) => {
@@ -452,9 +489,10 @@ function ChatPanel({ messages, page, loading }: { messages: Message[]; page: Pag
   };
   return <section className="chat-page tab-panel panel-block">
     <PanelHead title="聊天记录" actions={<><label className="switch-label"><input type="checkbox" checked={onlyChat} onChange={event => setOnlyChatValue(event.target.checked)} /><span className="switch" />仅看聊天</label>{page && <Pager control={page} />}</>} />
-    <div className="panel-body"><div className="chat-list" ref={scrollRef} onScroll={onScroll} aria-label="聊天记录滚动区">{loading ? <LoadingState /> : rows.length === 0 ? <EmptyState text="这个范围还没有消息" /> : rows.map((message, index) => {
-      const isKill = String(message.kind || '').toLowerCase() === 'kill';
-      return <div className={isKill ? 'chat-row kill' : 'chat-row'} key={`${message.message_id || message.messageId || index}`}><time>{formatTime(message.event_at || message.eventAt)}</time><p>{!isKill && message.user_name && <strong>{message.user_name}</strong>}<span>{message.text}</span></p></div>;
+    <div className="panel-body"><div className="chat-list" ref={scrollRef} onScroll={onScroll} aria-label="聊天记录滚动区">{loading ? <LoadingState /> : rows.length === 0 ? <EmptyState text="这个范围还没有消息" /> : rows.map(row => {
+      if (row.kind === 'kill-summary') return <div className="chat-row kill-summary" key={row.key}><span>{row.count}条击杀记录已折叠</span></div>;
+      const isKill = String(row.message.kind || '').toLowerCase() === 'kill';
+      return <div className={isKill ? 'chat-row kill' : 'chat-row'} key={row.key}><time>{formatTime(row.message.event_at || row.message.eventAt)}</time><p>{!isKill && row.message.user_name && <strong>{row.message.user_name}</strong>}<span>{row.message.text}</span></p></div>;
     })}</div></div>
   </section>;
 }
@@ -724,7 +762,7 @@ function PlayersPanel({ players, map, scope }: { players: Player[]; map: MapMeta
 }
 
 function ResourceContent({ route, meta, resource, page, loading }: { route: PanelRoute; meta: MetaResponse; resource: ResourceResponse; page: PageControl | null; loading: boolean }) {
-  if (route.tab === 'chat') return <ChatPanel messages={resource.messages || []} page={page} loading={loading} />;
+  if (route.tab === 'chat') return <ChatPanel messages={resource.messages || []} page={page} loading={loading} foldedAfter={resource.foldedAfter || 0} />;
   if (route.tab === 'map') return <MapView players={(resource.players || []) as MapPlayer[]} map={resource.map || meta.map} />;
   if (route.tab === 'players') return <PlayersPanel players={(resource.players || []) as Player[]} map={meta.map} scope={route.scope} />;
   return <KillTable kills={resource.kills || []} map={meta.map} page={page} filterOptions={resource.filterOptions || null} loading={loading} />;

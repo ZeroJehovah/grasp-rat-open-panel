@@ -339,7 +339,9 @@ function fixture() {
 
   // 历史分页：过滤和裁剪在路由层做，store 仍然返回整个区间。
   // 每 5 条里 1 条聊天、4 条击杀播报：这正是"仅看聊天"要解决的比例问题。
-  const pageMessages = Array.from({ length: 250 }, (_, index) => ({ message_id: `m${index}`, kind: index % 5 === 0 ? 'chat' : 'kill', event_at: `2026-08-20T00:00:${String(index % 60).padStart(2, '0')}Z` }));
+  // 每 3 条里 1 条击杀播报，且首尾都是击杀：留下的聊天行成对出现，每对的第一行带
+  // folded_before=1，末尾还剩 1 条要作为 foldedAfter 落在最后一页上。
+  const pageMessages = Array.from({ length: 250 }, (_, index) => ({ message_id: `m${index}`, kind: index % 3 === 0 ? 'kill' : 'chat', event_at: `2026-08-20T00:00:${String(index % 60).padStart(2, '0')}Z` }));
   const pageKills = Array.from({ length: 12 }, (_, index) => ({
     kill_id: `k${index}`,
     event_at: `2026-08-20T00:00:${String(index).padStart(2, '0')}Z`,
@@ -377,11 +379,19 @@ function fixture() {
   assert.strictEqual(pageTwo.headers['x-panel-cache'], 'miss');
   assert.strictEqual((await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&page=2` })).headers['x-panel-cache'], 'hit');
   const onlyChat = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&onlyChat=1` });
-  assert.deepStrictEqual(onlyChat.json().pagination, { page: 1, pageSize: 100, total: 50, totalPages: 1, hasPrev: false, hasNext: false }, '仅看聊天必须按过滤后的条数分页');
+  assert.deepStrictEqual(onlyChat.json().pagination, { page: 1, pageSize: 100, total: 166, totalPages: 2, hasPrev: false, hasNext: true }, '仅看聊天必须按过滤后的条数分页');
   assert.ok(onlyChat.json().messages.every(message => message.kind === 'chat'), '仅看聊天只排除击杀播报');
+  assert.strictEqual(onlyChat.json().messages[0].folded_before, 1, '被折掉的击杀条数要挂在紧接其后的消息上');
+  assert.strictEqual(onlyChat.json().messages[1].folded_before, undefined, '前面没折东西的消息不带这个字段');
+  assert.strictEqual(onlyChat.json().foldedAfter, undefined, '尾部折叠只属于最后一页');
   assert.notStrictEqual(onlyChat.headers.etag, firstPage.headers.etag, '过滤条件进缓存键');
+  const onlyChatLast = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&onlyChat=1&page=last` });
+  assert.strictEqual(onlyChatLast.json().messages.length, 66);
+  assert.strictEqual(onlyChatLast.json().foldedAfter, 1, '最后一页要带上末尾还剩的折叠条数');
   const onlyChatOff = await pageApp.inject({ method: 'GET', url: `${chatBase}&pageSize=100&onlyChat=0` });
   assert.strictEqual(onlyChatOff.json().pagination.total, 250, 'onlyChat=0 等于不过滤');
+  assert.ok(onlyChatOff.json().messages.every(message => message.folded_before === undefined), '不折叠时不能改动原始行');
+  assert.strictEqual(onlyChatOff.json().foldedAfter, undefined);
   for (const bad of ['pageSize=250', 'pageSize=100&page=0', 'pageSize=100&page=x', 'page=2', 'minDrop=1', 'onlyChat=yes']) {
     const response = await pageApp.inject({ method: 'GET', url: `${chatBase}&${bad}` });
     assert.strictEqual(response.statusCode, 400, `${bad} 必须被拒绝`);

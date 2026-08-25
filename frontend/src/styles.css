@@ -21,6 +21,7 @@
   --red: #c7483b;
   --red-soft: #f3d9d5;
   --blue: #56849a;
+  --dot-neutral: #1b2525;
   --scrollbar-thumb: rgba(119, 129, 125, .52);
   --shadow: 0 14px 40px rgba(43, 49, 39, .07);
 }
@@ -32,6 +33,7 @@
   --paper: #202827;
   --paper-strong: #26302f;
   --ink: #e6e9df;
+  --dot-neutral: #f6f2e6;
   --muted: #91a09b;
   --line: #394441;
   --line-strong: #59635e;
@@ -88,10 +90,10 @@ h2 { margin: 0; font-size: 14px; letter-spacing: -.02em; }
 .preset:hover { color: var(--ink); border-color: var(--line-strong); }
 .preset:disabled { cursor: not-allowed; opacity: .42; }
 .preset.active { color: var(--paper-strong); border-color: var(--ink); background: var(--ink); }
-.date-fields { display: flex; align-items: end; gap: 7px; color: var(--muted); font-size: 10px; }
+.date-fields { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; }
 .date-fields label { min-width: 124px; }
-.date-fields input { display: block; width: 100%; min-width: 0; margin-top: 4px; border: 1px solid var(--line); border-radius: 0; padding: 6px 7px; color: var(--ink); background: var(--paper-strong); font-size: 11px; }
-.date-fields > span { padding-bottom: 7px; color: var(--line-strong); }
+.date-fields input { display: block; width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 0; padding: 6px 7px; color: var(--ink); background: var(--paper-strong); font-size: 11px; }
+.date-fields > span { color: var(--line-strong); }
 .micro-note { min-width: 0; margin: 0 0 0 auto; color: var(--muted); font-size: 10px; line-height: 1.45; text-align: right; white-space: nowrap; }
 .main-grid { min-height: 0; display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 16px; }
 .tab-menu { min-width: 0; padding-top: 8px; display: flex; flex-direction: column; gap: 3px; }
@@ -120,6 +122,7 @@ h2 { margin: 0; font-size: 14px; letter-spacing: -.02em; }
 .chat-row p { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .chat-row strong { margin-right: 5px; color: var(--green); font-weight: 700; }
 .chat-row.kill p { color: var(--red); }
+.chat-row.kill-summary { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 10px; }
 .empty-state { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 80px; color: var(--muted); font-size: 11px; }
 .drop-threshold-control { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .drop-threshold-slider { width: clamp(110px, 15vw, 180px); min-width: 100px; height: 16px; margin: 0; padding: 0; border: 0; color: var(--accent); background: transparent; accent-color: var(--accent); cursor: ew-resize; }
@@ -140,7 +143,8 @@ h2 { margin: 0; font-size: 14px; letter-spacing: -.02em; }
 .player-dot { stroke: var(--paper-strong); stroke-width: 2.5; }
 .player-ring { fill: none; stroke-width: 1.8; opacity: .72; }
 .player-dot.good, .dot.good { fill: var(--green); background: var(--green); }.player-ring.good { stroke: var(--green); }
-.player-dot.light, .dot.light { fill: #f6f2e6; background: #f6f2e6; }.player-ring.light { stroke: #f6f2e6; }
+/* "1d 不满 / 5s 满"这档在暗底上是米白，亮底上必须反过来取近黑，否则点和面板底色一个颜色。 */
+.player-dot.light, .dot.light { fill: var(--dot-neutral); background: var(--dot-neutral); }.player-ring.light { stroke: var(--dot-neutral); }
 .player-dot.bad, .dot.bad { fill: var(--red); background: var(--red); }.player-ring.bad { stroke: var(--red); }
 .map-zoom-buttons { position: absolute; right: 14px; bottom: 14px; z-index: 3; display: grid; gap: 5px; }
 .map-readout { position: absolute; top: 14px; right: 14px; display: grid; gap: 4px; min-width: 188px; max-width: min(320px, calc(100% - 28px)); padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--line) 70%, transparent); color: var(--muted); background: color-mix(in srgb, var(--paper) 88%, transparent); font-size: 10px; backdrop-filter: blur(8px); }

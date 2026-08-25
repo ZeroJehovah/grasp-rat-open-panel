@@ -142,11 +142,22 @@ function applyMinDrop(rows, minDrop) {
   });
 }
 
-// 只排除击杀播报。将来若有别的 kind（系统公告之类），"仅看聊天"应该继续显示它们，
+// "仅看聊天"只折叠击杀播报。将来若有别的 kind（系统公告之类），它应该继续显示，
 // 这和改造前前端只折叠 kill 的行为一致。
-function applyOnlyChat(rows, onlyChat) {
-  if (!onlyChat) return rows;
-  return rows.filter(row => String(row?.kind || '').toLowerCase() !== 'kill');
+//
+// 折叠不是丢弃：每条留下的消息带上紧挨它之前被折掉的条数（folded_before），末尾还剩的
+// 条数由调用方作为 foldedAfter 附在最后一页上。这样前端不必拿到被折掉的行也能画出
+// "N 条击杀记录已折叠"那道摘要，而分页仍然只按留下的行数算页。
+function foldKillMessages(rows) {
+  const kept = [];
+  let pending = 0;
+  for (const row of rows) {
+    if (String(row?.kind || '').toLowerCase() === 'kill') { pending += 1; continue; }
+    // 只复制要留下的行：payload 里的数组来自按天缓存的分片，绝不能就地改。
+    kept.push(pending > 0 ? { ...row, folded_before: pending } : row);
+    pending = 0;
+  }
+  return { rows: kept, trailing: pending };
 }
 
 function applyUsers(rows, users) {
@@ -163,10 +174,15 @@ function sliceHistoryPage(resource, payload, request) {
   if (!key) return payload;
   const rows = Array.isArray(payload[key]) ? payload[key] : [];
   const kills = resource === 'kills';
+  const fold = !kills && request.filters?.onlyChat ? foldKillMessages(rows) : null;
   // 击杀先按阈值过滤（玩家候选表要以阈值过滤后的结果为准），再按玩家过滤；聊天只有"仅看聊天"一档。
-  const thresholdRows = kills ? applyMinDrop(rows, request.filters?.minDrop) : applyOnlyChat(rows, request.filters?.onlyChat);
+  const thresholdRows = kills ? applyMinDrop(rows, request.filters?.minDrop) : fold ? fold.rows : rows;
   const filtered = kills ? applyUsers(thresholdRows, request.filters?.users) : thresholdRows;
-  if (request.pageSize === null) return { ...payload, [key]: filtered };
+  if (request.pageSize === null) {
+    const whole = { ...payload, [key]: filtered };
+    if (fold?.trailing) whole.foldedAfter = fold.trailing;
+    return whole;
+  }
   const total = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / request.pageSize));
   // 越界的页号一律夹到有效范围而不是报错：调高阈值会让总页数变少，此时用户手上的页号
@@ -178,6 +194,8 @@ function sliceHistoryPage(resource, payload, request) {
     [key]: filtered.slice(start, start + request.pageSize),
     pagination: { page, pageSize: request.pageSize, total, totalPages, hasPrev: page > 1, hasNext: page < totalPages }
   };
+  // 尾部折叠排在所有留下的行之后，所以它只属于最后一页。
+  if (fold?.trailing && page === totalPages) result.foldedAfter = fold.trailing;
   if (kills) result.filterOptions = { players: buildPlayerOptions(rows, thresholdRows, request.filters?.users) };
   return result;
 }

@@ -72,6 +72,8 @@ export interface Message {
   eventAt?: string;
   kind: string;
   text: string;
+  // 后端"仅看聊天"折叠掉的击杀条数：紧挨这条消息之前被折起来的数量。
+  folded_before?: number;
   user_id?: number | null;
   target_user_id?: number | null;
   user_name?: string | null;
@@ -167,4 +169,6 @@ export interface ResourceResponse {
   kills?: Kill[];
   pagination?: HistoryPagination;
   filterOptions?: HistoryFilterOptions;
+  // 最后一页尾部还剩的折叠条数（只在最后一页出现）。
+  foldedAfter?: number;
 }
