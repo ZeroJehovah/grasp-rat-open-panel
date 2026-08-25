@@ -5,7 +5,7 @@
   "description": "Read-only Grasp Rat panel collector, structured projector, API and SPA",
   "type": "commonjs",
   "scripts": {
-    "test": "node test/snapshot-collector.test.js && node test/collector.test.js && node test/domain.test.js && node test/api.test.js && node test/retention.test.js && node test/health-check.test.js && node test/backfill.test.js",
+    "test": "node test/snapshot-collector.test.js && node test/collector.test.js && node test/domain.test.js && node test/api.test.js && node test/cache.test.js && node test/retention.test.js && node test/health-check.test.js && node test/backfill.test.js",
     "collect:once": "node snapshot-collector.js --once",
     "replay": "node commands/replay-snapshots.js",
     "backfill:postgres": "node commands/backfill-postgres.js",

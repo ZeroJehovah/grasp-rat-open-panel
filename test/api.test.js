@@ -128,7 +128,101 @@ function fixture() {
   await compressedApp.close();
   const cachedHistory = await app.inject({ method: 'GET', url: '/api/v1/history?from=2026-08-22&to=2026-08-22', headers: { 'if-none-match': history.headers.etag } });
   assert.strictEqual(cachedHistory.statusCode, 304);
+
+  // Cloudflare 把强 ETag 改写成弱形式，浏览器原样回传。修复前服务端精确比较，公网上
+  // 每次条件请求都在全量下载。
+  const weakEtag = `W/${realtime.headers.etag}`;
+  const weakRealtime = await app.inject({ method: 'GET', url: '/api/v1/realtime', headers: { 'if-none-match': weakEtag } });
+  assert.strictEqual(weakRealtime.statusCode, 304, 'a weak ETag must satisfy If-None-Match');
+  const weakList = await app.inject({ method: 'GET', url: '/api/v1/realtime', headers: { 'if-none-match': `W/"stale", ${realtime.headers.etag}` } });
+  assert.strictEqual(weakList.statusCode, 304);
+  const starMatch = await app.inject({ method: 'GET', url: '/api/v1/realtime', headers: { 'if-none-match': '*' } });
+  assert.strictEqual(starMatch.statusCode, 304);
+  const weakHistory = await app.inject({ method: 'GET', url: '/api/v1/history/chat?from=2026-08-22&to=2026-08-22' });
+  const weakHistoryRepeat = await app.inject({ method: 'GET', url: '/api/v1/history/chat?from=2026-08-22&to=2026-08-22', headers: { 'if-none-match': `W/${weakHistory.headers.etag}` } });
+  assert.strictEqual(weakHistoryRepeat.statusCode, 304);
+
+  // meta 之前既没有 ETag 也没有 Cache-Control。
+  const metaRepeat = await app.inject({ method: 'GET', url: '/api/v1/meta' });
+  assert.ok(metaRepeat.headers.etag, 'meta must carry an ETag');
+  assert.strictEqual(metaRepeat.headers['cache-control'], 'public, max-age=30, s-maxage=60, stale-while-revalidate=300');
+  assert.strictEqual(metaRepeat.headers['x-panel-cache'], 'hit');
+  const metaCached = await app.inject({ method: 'GET', url: '/api/v1/meta', headers: { 'if-none-match': `W/${metaRepeat.headers.etag}` } });
+  assert.strictEqual(metaCached.statusCode, 304);
+
+  const realtimeRepeat = await app.inject({ method: 'GET', url: '/api/v1/realtime/chat' });
+  assert.strictEqual(realtimeRepeat.headers['x-panel-cache'], 'hit');
+  assert.strictEqual(realtimeRepeat.headers['content-type'], 'application/json; charset=utf-8');
+  assert.strictEqual(realtimeRepeat.headers['cache-control'], 'public, max-age=5, s-maxage=10, stale-while-revalidate=30');
+  assert.strictEqual(realtimeRepeat.headers['cdn-cache-control'], 'public, max-age=10, stale-while-revalidate=30');
+  assert.ok(app.panelCache.stats().hits > 0);
+
+  // 版本未变化的轻量响应绝不能落进全量响应的缓存键，否则后面没带令牌的请求就没数据了。
+  const chatFull = await app.inject({ method: 'GET', url: '/api/v1/realtime/chat' });
+  const currentToken = chatFull.json().versionToken;
+  const chatUnchanged = await app.inject({ method: 'GET', url: `/api/v1/realtime/chat?version=${encodeURIComponent(currentToken)}` });
+  assert.strictEqual(chatUnchanged.json().unchanged, true);
+  assert.strictEqual(chatUnchanged.headers['x-panel-cache'], 'bypass');
+  const chatAfterUnchanged = await app.inject({ method: 'GET', url: '/api/v1/realtime/chat' });
+  assert.strictEqual(chatAfterUnchanged.json().unchanged, undefined, 'the unchanged reply must not poison the shared cache entry');
+  assert.ok(Array.isArray(chatAfterUnchanged.json().messages));
+  // 过期令牌拿到的是全量响应，并且和不带令牌的请求共用同一条缓存。
+  const staleToken = await app.inject({ method: 'GET', url: '/api/v1/realtime/chat?version=stale-token' });
+  assert.strictEqual(staleToken.json().unchanged, undefined);
+  assert.strictEqual(staleToken.headers.etag, chatAfterUnchanged.headers.etag);
   await app.close();
+
+  // 版本令牌变化必须让实时缓存失效。
+  let mutableToken = 'v1';
+  let mutableMessages = [{ message_id: 'm1' }];
+  const mutableApp = await buildServer({ store: {
+    getMeta: async () => ({ earliestDate: '2026-08-22', latestDate: '2026-08-22', availableDates: ['2026-08-22'] }),
+    getLatestVersion: async () => ({ version_token: mutableToken, snapshot_id: mutableToken, server_day: '2026-08-22' }),
+    getRealtimeChat: async () => ({ unchanged: false, versionToken: mutableToken, messages: mutableMessages })
+  } });
+  const beforeBump = await mutableApp.inject({ method: 'GET', url: '/api/v1/realtime/chat' });
+  assert.deepStrictEqual(beforeBump.json().messages, [{ message_id: 'm1' }]);
+  assert.strictEqual(beforeBump.headers['x-panel-cache'], 'miss');
+  mutableToken = 'v2';
+  mutableMessages = [{ message_id: 'm2' }];
+  const afterBump = await mutableApp.inject({ method: 'GET', url: '/api/v1/realtime/chat' });
+  assert.strictEqual(afterBump.headers['x-panel-cache'], 'miss', 'a new version token must miss the cache');
+  assert.deepStrictEqual(afterBump.json().messages, [{ message_id: 'm2' }], 'a new version token must not serve stale data');
+  assert.notStrictEqual(afterBump.headers.etag, beforeBump.headers.etag);
+  await mutableApp.close();
+
+  // 已结束的历史区间和含今天的区间必须分键，缓存头也不同。
+  const rangeApp = await buildServer({ store: {
+    getMeta: async () => ({ earliestDate: '2026-08-20', latestDate: '2026-08-22', availableDates: ['2026-08-20', '2026-08-21', '2026-08-22'] }),
+    getLatestVersion: async () => ({ version_token: 'range-v1', server_day: '2026-08-22' }),
+    getHistoryChat: async range => ({ from: range.from, to: range.to, closedThrough: range.to < '2026-08-22' ? range.to : null, messages: [{ message_id: `m-${range.to}` }] })
+  } });
+  const closedRange = await rangeApp.inject({ method: 'GET', url: '/api/v1/history/chat?from=2026-08-20&to=2026-08-20' });
+  assert.strictEqual(closedRange.headers['cache-control'], 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400');
+  assert.strictEqual(closedRange.headers['cdn-cache-control'], 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400');
+  const openRange = await rangeApp.inject({ method: 'GET', url: '/api/v1/history/chat?from=2026-08-21&to=2026-08-22' });
+  assert.strictEqual(openRange.headers['cache-control'], 'public, max-age=5, s-maxage=10, stale-while-revalidate=30');
+  assert.deepStrictEqual(openRange.json().messages, [{ message_id: 'm-2026-08-22' }], 'a different range must not reuse another range cache entry');
+  const closedRepeat = await rangeApp.inject({ method: 'GET', url: '/api/v1/history/chat?from=2026-08-20&to=2026-08-20' });
+  assert.strictEqual(closedRepeat.headers['x-panel-cache'], 'hit');
+  assert.deepStrictEqual(closedRepeat.json().messages, [{ message_id: 'm-2026-08-20' }]);
+  await rangeApp.close();
+
+  // PANEL_CACHE_DISABLED 的等价开关：每次请求都重新构建，但 ETag/304 仍然有效。
+  let bypassBuilds = 0;
+  const bypassApp = await buildServer({ cache: false, store: {
+    getMeta: async () => ({ earliestDate: '2026-08-22', latestDate: '2026-08-22', availableDates: ['2026-08-22'] }),
+    getLatestVersion: async () => ({ version_token: 'bypass-v1', server_day: '2026-08-22' }),
+    getRealtimeChat: async () => { bypassBuilds += 1; return { unchanged: false, versionToken: 'bypass-v1', messages: [] }; }
+  } });
+  const bypassFirst = await bypassApp.inject({ method: 'GET', url: '/api/v1/realtime/chat' });
+  const bypassSecond = await bypassApp.inject({ method: 'GET', url: '/api/v1/realtime/chat' });
+  assert.strictEqual(bypassBuilds, 2, 'a disabled cache must rebuild every request');
+  assert.strictEqual(bypassSecond.headers['x-panel-cache'], 'bypass');
+  assert.strictEqual(bypassApp.panelCache.stats().entries, 0);
+  const bypassConditional = await bypassApp.inject({ method: 'GET', url: '/api/v1/realtime/chat', headers: { 'if-none-match': `W/${bypassFirst.headers.etag}` } });
+  assert.strictEqual(bypassConditional.statusCode, 304);
+  await bypassApp.close();
 
   const oversizedApp = await buildServer({ store: {
     getMeta: async () => ({ earliestDate: '2026-08-22', latestDate: '2026-08-22' }),
