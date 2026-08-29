@@ -332,11 +332,19 @@ class ProjectionEngine {
     const generationChanged = this.lastStableVersion && this.lastStableVersion.reset_generation !== parsed.resetGeneration;
 
     for (const [uid, previousState] of previousStates) {
-      if (this.lastStableUsers.has(uid) && (!entitiesByUser.has(uid) || dayChanged || generationChanged)) {
+      // The first steady snapshot after a reset has an empty `lastStableUsers`,
+      // so gating on it dropped every player who had only appeared during the
+      // warming-up phase and then vanished before the world filled back up. Those
+      // players were still marked online by `projectWarmingState`, leaked into
+      // the realtime map and never got closed. Anchor on the previous live state
+      // instead: a player who was online in the previous frame and is now absent
+      // (or the world moved to a new day/generation) must be closed.
+      const wasOnline = Boolean(previousState && previousState.online);
+      if (wasOnline && (!entitiesByUser.has(uid) || dayChanged || generationChanged)) {
         const interval = this.openIntervals.get(uid);
         if (interval) {
-          interval.online_to_snapshot_id = this.lastStableVersion.snapshot_id;
-          interval.online_to_at = this.lastStableVersion.observed_at;
+          interval.online_to_snapshot_id = this.lastStableVersion?.snapshot_id ?? version.snapshot_id;
+          interval.online_to_at = this.lastStableVersion?.observed_at ?? version.observed_at;
           interval.closed_reason = dayChanged || generationChanged ? 'snapshot_boundary' : 'missing_from_steady_snapshot';
           this.openIntervals.delete(uid);
           this.lastTouchedIntervals.push(interval);

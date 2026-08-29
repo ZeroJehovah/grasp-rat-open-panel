@@ -361,4 +361,26 @@ function observation(engine, value, time) {
   assert.strictEqual(engine.dailyQuota.get('2026-08-23:7').income, 0);
 })();
 
+// 回归：世界重启后实体集在 warming 阶段缓慢爬回 900。这个阶段上过线、但在首次稳定快照
+// 到达前就消失的玩家，之前会带着 online=true 残留在玩家表和实时地图上——因为首跳稳定时
+// lastStableUsers 还是空集，关闭逻辑永远匹配不到他们。
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 2 });
+  const ghost = entity({ user_id: 7, entity_id: 11, name: 'ghost', death_drop_coins: 76, x: -8863, y: -20881 });
+  const warming = observation(engine, body(100, { entities: [ghost] }), '00:01:00');
+  assert.strictEqual(warming.status, 'warming_up', '单实体世界必须先进入预热');
+  assert.strictEqual(engine.players.get('7').online, true, '预热阶段该玩家确实在线');
+
+  // 世界补满到稳定，但 ghost 已经不在里面，换成另外两个玩家。
+  const a = entity({ user_id: 8, entity_id: 12, name: 'a' });
+  const b = entity({ user_id: 9, entity_id: 13, name: 'b' });
+  const steady = observation(engine, body(200, { entities: [a, b] }), '00:02:00');
+  assert.strictEqual(steady.status, 'projected');
+  assert.strictEqual(engine.players.get('7').online, false, '预热期消失的玩家在首跳稳定时必须被关闭');
+  const map = engine.getRealtimeMap();
+  assert.ok(!map.players.some(player => player.userId === 7), '实时地图不得含预热期残留的幽灵玩家');
+  assert.ok(map.players.some(player => player.userId === 8), '稳定快照里确实在线的玩家保留');
+  assert.strictEqual(engine.currentStates.get('7').online, false);
+})();
+
 console.log('domain tests passed');
