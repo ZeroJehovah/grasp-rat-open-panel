@@ -15,7 +15,13 @@ const {
 } = require('./history-cache');
 
 const MESSAGE_COLUMNS = 'server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id';
-const KILL_COLUMNS = 'local_date::text, kill_id, message_id, event_at, server_day::text, tick, killer_user_id, victim_user_id, killer_name, victim_name, confidence, evidence_snapshot_id, drop, victim_position, killer_position, victim_stamina_5s, victim_stamina_5s_limit, parser_version';
+
+// 击杀行里 killer_name / victim_name 可能在投影时还没解析出玩家名（那时该玩家尚未在当前
+// 快照的实体表里出现），因此只存成了 null。展示和玩家筛选面板都需要名称，这里统一用
+// players.current_name 作为兜底，仍取不到时保持 null，让前端继续回退显示"未知"/ID。
+const KILL_NAME_COALESCE = 'COALESCE(ke.killer_name, NULLIF(pk.current_name, \'\')) AS killer_name, COALESCE(ke.victim_name, NULLIF(pv.current_name, \'\')) AS victim_name';
+const KILL_FROM_JOIN = 'FROM kill_events ke LEFT JOIN players pk ON pk.user_id = ke.killer_user_id LEFT JOIN players pv ON pv.user_id = ke.victim_user_id';
+const KILL_COLUMNS_RESOLVED = `ke.local_date::text, ke.kill_id, ke.message_id, ke.event_at, ke.server_day::text, ke.tick, ke.killer_user_id, ke.victim_user_id, ${KILL_NAME_COALESCE}, ke.confidence, ke.evidence_snapshot_id, ke.drop, ke.victim_position, ke.killer_position, ke.victim_stamina_5s, ke.victim_stamina_5s_limit, ke.parser_version`;
 
 const HISTORY_ROW_LIMITS = Object.freeze({
   players: 5_000,
@@ -187,7 +193,7 @@ class PostgresPanelStore {
       this.query('SELECT user_id, quota_day::text, initial_quota, quota_value, quota_source, last_snapshot_id, updated_at FROM player_quota_current'),
       this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at, source_snapshot_id FROM player_daily_quota'),
       this.query('SELECT server_day::text, message_id, tick, kind, text, user_id, target_user_id, user_name, target_name, event_at, first_observed_snapshot_id, last_observed_snapshot_id, first_observed_at, last_observed_at FROM message_events'),
-      this.query(`SELECT ${KILL_COLUMNS} FROM kill_events`),
+      this.query(`SELECT ${KILL_COLUMNS_RESOLVED} ${KILL_FROM_JOIN}`),
       this.query('SELECT server_day::text, drop_id, first_seen_snapshot_id, last_seen_snapshot_id, first_seen_at, last_seen_at, disappeared_at, source_user_id, system_spawned, x, y, amount, created_tick, source, confidence, kill_event_id FROM coin_drop_lifecycles'),
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats'),
       this.query('SELECT user_id, name, first_observed_at, last_observed_at FROM player_name_history'),
@@ -362,7 +368,7 @@ class PostgresPanelStore {
         LEFT JOIN player_daily_quota d ON d.user_id = p.user_id AND d.local_date = $1::date
         `, [latest.server_day]),
       this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day = $1::date ORDER BY event_at, server_day, message_id`, [latest.server_day]),
-      this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id`, [latest.server_day]),
+      this.query(`SELECT ${KILL_COLUMNS_RESOLVED} ${KILL_FROM_JOIN} WHERE ke.local_date = $1::date ORDER BY ke.event_at, ke.local_date, ke.kill_id`, [latest.server_day]),
       this.query('SELECT local_date::text, user_id, kills, deaths FROM player_daily_stats WHERE local_date = $1::date', [latest.server_day]),
       this.query('SELECT user_id, quota_day::text, initial_quota, quota_value FROM player_quota_current WHERE quota_day = $1::date', [latest.server_day]),
       this.query('SELECT payload FROM map_metadata ORDER BY updated_at DESC LIMIT 1')
@@ -394,7 +400,7 @@ class PostgresPanelStore {
     const currentDay = latest?.server_day ? String(latest.server_day).slice(0, 10) : null;
     const [messages, kills, stats, quota, players] = await Promise.all([
       this.query(`SELECT ${MESSAGE_COLUMNS} FROM message_events WHERE server_day BETWEEN $1::date AND $2::date ORDER BY event_at, server_day, message_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.messages + 1]),
-      this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]),
+      this.query(`SELECT ${KILL_COLUMNS_RESOLVED} ${KILL_FROM_JOIN} WHERE ke.local_date BETWEEN $1::date AND $2::date ORDER BY ke.event_at, ke.local_date, ke.kill_id LIMIT $3`, [range.from, range.to, HISTORY_ROW_LIMITS.kills + 1]),
       this.query('SELECT local_date::text, user_id, SUM(kills)::int AS kills, SUM(deaths)::int AS deaths FROM player_daily_stats WHERE local_date BETWEEN $1::date AND $2::date GROUP BY local_date, user_id ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.stats + 1]),
       this.query('SELECT local_date::text, user_id, initial_quota, closing_quota, income, finalized_at FROM player_daily_quota WHERE local_date BETWEEN $1::date AND $2::date ORDER BY local_date, user_id LIMIT $3', [range.from, range.to, HISTORY_ROW_LIMITS.dailyQuota + 1]),
       this.query(`WITH ranged_income AS (
@@ -494,7 +500,7 @@ class PostgresPanelStore {
       return { ...common, messages: result.rows };
     }
     if (resource === 'kills') {
-      const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date = $1::date ORDER BY event_at, local_date, kill_id`, [latest.server_day]);
+      const result = await this.query(`SELECT ${KILL_COLUMNS_RESOLVED} ${KILL_FROM_JOIN} WHERE ke.local_date = $1::date ORDER BY ke.event_at, ke.local_date, ke.kill_id`, [latest.server_day]);
       return { ...common, kills: result.rows };
     }
     if (resource === 'map') {
@@ -570,7 +576,7 @@ class PostgresPanelStore {
     }
     if (resource === 'kills') {
       const limit = rowCap || HISTORY_ROW_LIMITS.kills;
-      const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date BETWEEN $1::date AND $2::date ORDER BY event_at, local_date, kill_id LIMIT $3`, [range.from, range.to, limit + 1]);
+      const result = await this.query(`SELECT ${KILL_COLUMNS_RESOLVED} ${KILL_FROM_JOIN} WHERE ke.local_date BETWEEN $1::date AND $2::date ORDER BY ke.event_at, ke.local_date, ke.kill_id LIMIT $3`, [range.from, range.to, limit + 1]);
       return { ...common, kills: limitedRows(result, 'kills', limit) };
     }
     if (resource === 'players') {
@@ -623,7 +629,7 @@ class PostgresPanelStore {
   }
 
   async getKillDayRows(day) {
-    const result = await this.query(`SELECT ${KILL_COLUMNS} FROM kill_events WHERE local_date = $1::date ORDER BY event_at, kill_id LIMIT $2`, [day, HISTORY_ROW_LIMITS.kills + 1]);
+    const result = await this.query(`SELECT ${KILL_COLUMNS_RESOLVED} ${KILL_FROM_JOIN} WHERE ke.local_date = $1::date ORDER BY ke.event_at, ke.kill_id LIMIT $2`, [day, HISTORY_ROW_LIMITS.kills + 1]);
     return limitedRows(result, 'kills', HISTORY_ROW_LIMITS.kills);
   }
 

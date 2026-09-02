@@ -391,9 +391,9 @@ function EmptyState({ text }: { text: string }) { return <div className="empty-s
 // 历史页换查询参数时数据部分先清空：留着上一页的行会让人分不清看到的是新结果还是旧结果。
 function LoadingState() { return <div className="empty-state"><RefreshCw size={16} className="spin" /><span>正在加载…</span></div>; }
 
-function PanelHead({ title, tooltip, actions }: { title: string; tooltip?: string; actions?: ReactNode }) {
+function PanelHead({ title, subtitle, tooltip, actions }: { title: string; subtitle?: ReactNode; tooltip?: string; actions?: ReactNode }) {
   return <div className="panel-head">
-    <div className="panel-title"><h2>{title}</h2>{tooltip && <span className="tooltip" tabIndex={0} role="img" aria-label={`${title}显示条件`} data-tooltip={tooltip}><CircleHelp size={14} /></span>}</div>
+    <div className="panel-title"><h2>{title}</h2>{subtitle !== undefined && <span className="result-count">{subtitle}</span>}{tooltip && <span className="tooltip" tabIndex={0} role="img" aria-label={`${title}显示条件`} data-tooltip={tooltip}><CircleHelp size={14} /></span>}</div>
     {actions && <div className="panel-actions">{actions}</div>}
   </div>;
 }
@@ -718,6 +718,9 @@ function KillTable({ kills, map, page, filterOptions, loading }: { kills: Kill[]
     return Array.from(ids, id => [id, namesById.get(id) || null] as [number, string | null]).sort((a, b) => String(a[1] || a[0]).localeCompare(String(b[1] || b[0]), 'zh-Hans-u-co-pinyin'));
   }, [filterOptions, namesById, overThreshold, page, selected]);
   const filtered = useMemo(() => overThreshold.slice().filter(kill => page || selected.length === 0 || selected.includes(Number(kill.killer_user_id)) || selected.includes(Number(kill.victim_user_id))).sort((a, b) => String(a.event_at || a.eventAt || '').localeCompare(String(b.event_at || b.eventAt || ''))), [overThreshold, page, selected]);
+  // 标题旁显示"当前筛选出来的条目数"：分页模式里 filtered 只有当前页，总数得看后端分页；
+  // 实时模式没有分页，filtered 就是全部命中行。
+  const filteredTotal = page && page.pagination ? page.pagination.total : filtered.length;
   const onScroll = useListScroll(scrollRef, filtered.map(kill => `${kill.kill_id || kill.killId}:${kill.event_at || kill.eventAt}`).join('|'), filterVersion, page ? 'top' : 'bottom');
   const updateThreshold = (next: number) => {
     localStorage.setItem(KILL_THRESHOLD_KEY, String(next));
@@ -745,7 +748,7 @@ function KillTable({ kills, map, page, filterOptions, loading }: { kills: Kill[]
     return <td><button type="button" className={active ? 'player-filter-link active' : 'player-filter-link'} onClick={() => toggleSelected(numeric)} title={active ? `取消筛选 ${label}` : `只看 ${label}`}>{label}</button></td>;
   };
   return <section className="kill-panel tab-panel panel-block">
-    <PanelHead title="击杀明细" actions={<><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} commitDelayMs={DROP_THRESHOLD_COMMIT_MS} /><details className="player-filter"><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{options.length === 0 ? <p className="player-options-empty">没有符合阈值的玩家</p> : options.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(id)} onChange={() => toggleSelected(id)} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={clearSelected}><X size={13} />清除</button>}{page && <Pager control={page} />}</>} />
+    <PanelHead title="击杀明细" subtitle={`${loading ? '--' : displayNumber(filteredTotal)} 条`} actions={<><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} commitDelayMs={DROP_THRESHOLD_COMMIT_MS} /><details className="player-filter"><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{options.length === 0 ? <p className="player-options-empty">没有符合阈值的玩家</p> : options.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(id)} onChange={() => toggleSelected(id)} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={clearSelected}><X size={13} />清除</button>}{page && <Pager control={page} />}</>} />
     <div className="panel-body"><div className="table-shell kill-scroll" ref={scrollRef} onScroll={onScroll} aria-label="击杀表格滚动区"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>置信度</th><th>坐标</th><th>相对中心点</th><th className="numeric-head">掉落</th></tr></thead><tbody>{loading ? <tr><td colSpan={8}><LoadingState /></td></tr> : filtered.length === 0 ? <tr><td colSpan={8}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill); return <tr key={kill.kill_id || kill.killId || index}><td><time>{formatTime(kill.event_at || kill.eventAt)}</time></td>{nameCell(kill.killer_user_id, kill.killer_name)}{nameCell(kill.victim_user_id, kill.victim_name)}<td><span className={`kill-type ${type === '活跃' ? 'active' : type === '挂机' ? 'idle' : 'unknown'}`}>{type}</span></td><td><span className={`confidence ${kill.confidence}`}>{kill.confidence || 'unknown'}</span></td><PositionCells x={position.x} y={position.y} map={map} /><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></div>
   </section>;
 }
