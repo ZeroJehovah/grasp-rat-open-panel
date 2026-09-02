@@ -534,7 +534,7 @@ function stateColor(player: { state: StaminaState | null }): string {
 
 function StaminaCell({ player }: { player: Player }) {
   const state = player.state;
-  if (!state) return <span className="stamina-grid"><i className="muted">--</i></span>;
+  if (!state) return <span className="stamina-grid"><i className="muted" style={{ gridColumn: 3 }}>--</i></span>;
   const values: [number | null, string][] = [
     [state.stamina5s, state.stamina5sLimit === 0 ? 'bad' : state.stamina5s !== null && state.stamina5sLimit !== null && state.stamina5s >= state.stamina5sLimit ? 'good' : 'warn'],
     [state.stamina1h, state.stamina1h === 0 ? 'bad' : state.stamina1h !== null && state.stamina1h >= 1_000_000 ? 'good' : 'warn'],
