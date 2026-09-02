@@ -706,6 +706,7 @@ function KillTable({ kills, map, page, filterOptions, loading }: { kills: Kill[]
   const [localSelected, setLocalSelected] = useState<number[]>([]);
   const [filterVersion, setFilterVersion] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const playerFilterRef = useRef<HTMLDetailsElement>(null);
   const threshold = page ? page.state.minDrop : localThreshold;
   const selected = page ? page.state.users : localSelected;
   const overThreshold = useMemo(() => page ? kills : kills.filter(kill => { const amount = kill.drop?.amount; return amount !== null && amount !== undefined && amount >= threshold; }), [kills, page, threshold]);
@@ -742,6 +743,17 @@ function KillTable({ kills, map, page, filterOptions, loading }: { kills: Kill[]
     if (page) return page.update({ users: [], page: 1 });
     setLocalSelected([]);
   };
+  // 点击玩家筛选弹框之外的区域时关闭它。<details> 原生的 summary 只负责开关，不处理
+  // 外点收起，这里用一次 document 级监听补齐。
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const details = playerFilterRef.current;
+      if (!details || !details.open) return;
+      if (event.target instanceof Node && !details.contains(event.target)) details.open = false;
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, []);
   const nameCell = (id: number | null | undefined, name: string | null | undefined) => {
     const numeric = id === null || id === undefined ? null : Number(id);
     if (numeric === null || !Number.isFinite(numeric)) return <td>{name || '未知'}</td>;
@@ -750,7 +762,7 @@ function KillTable({ kills, map, page, filterOptions, loading }: { kills: Kill[]
     return <td><button type="button" className={active ? 'player-filter-link active' : 'player-filter-link'} onClick={() => toggleSelected(numeric)} title={active ? `取消筛选 ${label}` : `只看 ${label}`}>{label}</button></td>;
   };
   return <section className="kill-panel tab-panel panel-block">
-    <PanelHead title="击杀明细" subtitle={`${loading ? '--' : displayNumber(filteredTotal)} 条`} actions={<><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} commitDelayMs={DROP_THRESHOLD_COMMIT_MS} /><details className="player-filter"><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{options.length === 0 ? <p className="player-options-empty">没有符合阈值的玩家</p> : options.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(id)} onChange={() => toggleSelected(id)} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={clearSelected}><X size={13} />清除</button>}{page && <Pager control={page} />}</>} />
+    <PanelHead title="击杀明细" subtitle={`${loading ? '--' : displayNumber(filteredTotal)} 条`} actions={<><DropThresholdSlider value={threshold} ariaLabel="击杀 Drop 阈值" onChange={updateThreshold} commitDelayMs={DROP_THRESHOLD_COMMIT_MS} /><details className="player-filter" ref={playerFilterRef}><summary><Users size={14} /> 玩家筛选{selected.length ? ` · ${selected.length}` : ''}</summary><div className="player-options">{options.length === 0 ? <p className="player-options-empty">没有符合阈值的玩家</p> : options.map(([id, name]) => <label key={id}><input type="checkbox" checked={selected.includes(id)} onChange={() => toggleSelected(id)} />{name || id}</label>)}</div></details>{selected.length > 0 && <button className="clear-filter" onClick={clearSelected}><X size={13} />清除</button>}{page && <Pager control={page} />}</>} />
     <div className="panel-body"><div className="table-shell kill-scroll" ref={scrollRef} onScroll={onScroll} aria-label="击杀表格滚动区"><table className="kill-table"><thead><tr><th>时间</th><th>凶手</th><th>受害者</th><th>类型</th><th>置信度</th><th>坐标</th><th>相对中心点</th><th className="numeric-head">掉落</th></tr></thead><tbody>{loading ? <tr><td colSpan={8}><LoadingState /></td></tr> : filtered.length === 0 ? <tr><td colSpan={8}><EmptyState text="没有符合阈值的击杀记录" /></td></tr> : filtered.map((kill, index) => { const hasStaminaEvidence = kill.victim_stamina_5s !== null && kill.victim_stamina_5s !== undefined && kill.victim_stamina_5s_limit !== null && kill.victim_stamina_5s_limit !== undefined; const type = hasStaminaEvidence ? (Number(kill.victim_stamina_5s) === Number(kill.victim_stamina_5s_limit) ? '挂机' : '活跃') : '未知'; const position = killPosition(kill); return <tr key={kill.kill_id || kill.killId || index}><td><time>{formatTime(kill.event_at || kill.eventAt)}</time></td>{nameCell(kill.killer_user_id, kill.killer_name)}{nameCell(kill.victim_user_id, kill.victim_name)}<td><span className={`kill-type ${type === '活跃' ? 'active' : type === '挂机' ? 'idle' : 'unknown'}`}>{type}</span></td><td><span className={`confidence ${kill.confidence}`}>{kill.confidence || 'unknown'}</span></td><PositionCells x={position.x} y={position.y} map={map} /><td className="numeric">{kill.drop?.amount === null || kill.drop?.amount === undefined ? '未知' : displayNumber(kill.drop.amount)}</td></tr>; })}</tbody></table></div></div>
   </section>;
 }

@@ -11,7 +11,7 @@ export default [
     languageOptions: {
       parser: tsParser,
       parserOptions: { ecmaVersion: 'latest', sourceType: 'module', ecmaFeatures: { jsx: true } },
-      globals: { window: 'readonly', document: 'readonly', localStorage: 'readonly', fetch: 'readonly', AbortController: 'readonly', AbortSignal: 'readonly', console: 'readonly', URL: 'readonly', URLSearchParams: 'readonly', PopStateEvent: 'readonly', Location: 'readonly', HeadersInit: 'readonly', HTMLElement: 'readonly', HTMLDivElement: 'readonly', ResizeObserver: 'readonly', Intl: 'readonly', Map: 'readonly', Set: 'readonly' },
+      globals: { window: 'readonly', document: 'readonly', localStorage: 'readonly', fetch: 'readonly', AbortController: 'readonly', AbortSignal: 'readonly', console: 'readonly', URL: 'readonly', URLSearchParams: 'readonly', PopStateEvent: 'readonly', Location: 'readonly', HeadersInit: 'readonly', HTMLElement: 'readonly', HTMLDivElement: 'readonly', HTMLDetailsElement: 'readonly', ResizeObserver: 'readonly', PointerEvent: 'readonly', Node: 'readonly', Intl: 'readonly', Map: 'readonly', Set: 'readonly' },
     },
     plugins: { '@typescript-eslint': tsPlugin, 'react-hooks': reactHooks },
     rules: {
