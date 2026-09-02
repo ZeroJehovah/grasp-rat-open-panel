@@ -623,6 +623,8 @@ function MapView({ players, map }: { players: MapPlayer[]; map: MapMetadata }) {
   const [hoveredId, setHoveredId] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
   const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const pinchRef = useRef<number | null>(null);
 
@@ -669,6 +671,28 @@ function MapView({ players, map }: { players: MapPlayer[]; map: MapMetadata }) {
     const center = { x: world.x - (anchor.x - size.width / 2) / nextScale, y: world.y - (anchor.y - size.height / 2) / nextScale };
     return { zoom, center: clampCenter(center, zoom) };
   });
+  const zoomHandlerRef = useRef<(next: number, anchor?: { x: number; y: number }) => void>(() => {});
+  zoomHandlerRef.current = (next, anchor) => setZoomAt(next, anchor);
+  useEffect(() => {
+    const element = stageRef.current;
+    if (!element) return;
+    const onWheel = (event: globalThis.WheelEvent) => {
+      event.preventDefault();
+      const point = pointerPosition(event);
+      zoomHandlerRef.current(cameraRef.current.zoom * (event.deltaY > 0 ? 0.9 : 1.1), point || undefined);
+    };
+    const onTouchMove = (event: globalThis.TouchEvent) => {
+      if (event.touches.length !== 2 || pinchRef.current === null) return;
+      event.preventDefault();
+      const distance = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY);
+      const next = cameraRef.current.zoom * (distance / pinchRef.current);
+      pinchRef.current = distance;
+      zoomHandlerRef.current(next);
+    };
+    element.addEventListener('wheel', onWheel, { passive: false });
+    element.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => { element.removeEventListener('wheel', onWheel); element.removeEventListener('touchmove', onTouchMove); };
+  }, []);
   const filtered = players.filter(player => {
     const dropMatch = player.drop !== null && player.drop >= threshold;
     const tired = player.state?.stamina1d !== null && player.state?.stamina1dLimit !== null && Boolean(player.state && player.state.stamina1d < player.state.stamina1dLimit);
@@ -682,7 +706,7 @@ function MapView({ players, map }: { players: MapPlayer[]; map: MapMetadata }) {
   const zoomIn = () => setZoomAt(camera.zoom * 1.35);
   const zoomOut = () => setZoomAt(camera.zoom / 1.35);
 
-  return <section className="map-panel tab-panel panel-block"><PanelHead title="实时地图" tooltip={MAP_PLAYER_SELECTION_TOOLTIP} actions={<DropThresholdSlider value={threshold} ariaLabel="地图 Drop 阈值" onChange={updateThreshold} commitDelayMs={DROP_THRESHOLD_COMMIT_MS} />} /><div className="panel-body"><div className="map-stage"><div className="map-canvas" ref={stageRef} onWheel={event => { event.preventDefault(); const point = pointerPosition(event); setZoomAt(camera.zoom * (event.deltaY > 0 ? 0.9 : 1.1), point || undefined); }} onPointerDown={event => { const point = pointerPosition(event); if (!point) return; dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { const point = pointerPosition(event); if (!point) return; setMouseWorld(screenToWorld(point.x, point.y)); if (dragRef.current?.pointerId === event.pointerId && camera.zoom > 1) { const dx = point.x - dragRef.current.x; const dy = point.y - dragRef.current.y; setCamera(current => ({ ...current, center: clampCenter({ x: current.center.x - dx / scale, y: current.center.y - dy / scale }) })); dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; } }} onPointerUp={event => { dragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { dragRef.current = null; }} onPointerLeave={() => { setMouseWorld(null); setHoveredId(null); }} onTouchStart={event => { if (event.touches.length === 2) pinchRef.current = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY); }} onTouchMove={event => { if (event.touches.length !== 2 || pinchRef.current === null) return; event.preventDefault(); const distance = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY); setZoomAt(camera.zoom * distance / pinchRef.current); pinchRef.current = distance; }} onTouchEnd={() => { pinchRef.current = null; }}>
+  return <section className="map-panel tab-panel panel-block"><PanelHead title="实时地图" tooltip={MAP_PLAYER_SELECTION_TOOLTIP} actions={<DropThresholdSlider value={threshold} ariaLabel="地图 Drop 阈值" onChange={updateThreshold} commitDelayMs={DROP_THRESHOLD_COMMIT_MS} />} /><div className="panel-body"><div className="map-stage"><div className="map-canvas" ref={stageRef} onPointerDown={event => { const point = pointerPosition(event); if (!point) return; dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { const point = pointerPosition(event); if (!point) return; setMouseWorld(screenToWorld(point.x, point.y)); if (dragRef.current?.pointerId === event.pointerId && camera.zoom > 1) { const dx = point.x - dragRef.current.x; const dy = point.y - dragRef.current.y; setCamera(current => ({ ...current, center: clampCenter({ x: current.center.x - dx / scale, y: current.center.y - dy / scale }) })); dragRef.current = { pointerId: event.pointerId, x: point.x, y: point.y }; } }} onPointerUp={event => { dragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { dragRef.current = null; }} onPointerLeave={() => { setMouseWorld(null); setHoveredId(null); }} onTouchStart={event => { if (event.touches.length === 2) pinchRef.current = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY); }} onTouchEnd={() => { pinchRef.current = null; }}>
     <svg viewBox={`0 0 ${size.width} ${size.height}`} role="img" aria-label="实时玩家地图">
       {(() => { const x0Top = worldToScreen(0, map.bounds.minY); const x0Bottom = worldToScreen(0, map.bounds.maxY); const y0Left = worldToScreen(map.bounds.minX, 0); const y0Right = worldToScreen(map.bounds.maxX, 0); const center = worldToScreen(map.center.x, map.center.y); return <><path d={`M${x0Top.x} ${x0Top.y} L${x0Bottom.x} ${x0Bottom.y} M${y0Left.x} ${y0Left.y} L${y0Right.x} ${y0Right.y}`} className="map-axis" /><circle cx={center.x} cy={center.y} r={worldRadius * scale} className="map-center-ring" /><text x={x0Bottom.x + 7} y={x0Bottom.y - 7} className="map-detail">x=0</text><text x={y0Right.x - 28} y={y0Right.y - 8} className="map-detail">y=0</text></>; })()}
       {filtered.map(player => { const state = player.state; if (!state || state.x === null || state.y === null) return null; const point = worldToScreen(state.x, state.y); const color = stateColor(player); const active = player.userId === (selectedId ?? hoveredId); return <Fragment key={player.userId}><g className="map-player" role="button" tabIndex={0} aria-label={`${player.name || player.userId} 玩家详情`} onPointerEnter={() => setHoveredId(player.userId)} onPointerLeave={() => setHoveredId(null)} onClick={event => { event.stopPropagation(); setSelectedId(current => current === player.userId ? null : player.userId); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedId(current => current === player.userId ? null : current); } }}><circle cx={point.x} cy={point.y} r={active ? 9 : 6} className={`player-dot ${color}`} /><circle cx={point.x} cy={point.y} r={active ? 17 : 12} className={`player-ring ${color}`} /><circle cx={point.x} cy={point.y} r="24" className="player-hit" /><title>{player.name || player.userId}</title></g><text x={point.x + 13} y={point.y - 12} className="map-label" pointerEvents="none"><tspan x={point.x + 13} className="map-name">{player.name || player.userId}</tspan><tspan x={point.x + 13} dy="14" className="map-drop">Drop {displayNumber(player.drop)}</tspan></text></Fragment>; })}
