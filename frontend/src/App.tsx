@@ -709,7 +709,9 @@ function KillTable({ kills, map, page, filterOptions, loading }: { kills: Kill[]
   const threshold = page ? page.state.minDrop : localThreshold;
   const selected = page ? page.state.users : localSelected;
   const overThreshold = useMemo(() => page ? kills : kills.filter(kill => { const amount = kill.drop?.amount; return amount !== null && amount !== undefined && amount >= threshold; }), [kills, page, threshold]);
-  const namesById = useMemo(() => new Map(kills.flatMap(kill => [[kill.killer_user_id, kill.killer_name], [kill.victim_user_id, kill.victim_name]]).filter(([id]) => id !== null && id !== undefined) as [number, string | null][]), [kills]);
+  // 后端把 killer_user_id / victim_user_id 当 bigint 序列化成了字符串，而下方 options 用
+  // Number(id) 去查名字。这里键必须同样归一成 number，否则查名永远 miss、面板回退显示 ID。
+  const namesById = useMemo(() => new Map(kills.flatMap(kill => [[kill.killer_user_id, kill.killer_name], [kill.victim_user_id, kill.victim_name]]).filter(([id]) => id !== null && id !== undefined).map(([id, name]) => [Number(id), name] as [number, string | null])), [kills]);
   const options = useMemo(() => {
     // 分页模式下候选表必须由后端给：本页之外的玩家在本地根本看不到。
     if (page) return (filterOptions?.players || []).map(player => [player.userId, player.name] as [number, string | null]);
