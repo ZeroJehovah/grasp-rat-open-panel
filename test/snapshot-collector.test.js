@@ -7,10 +7,12 @@ const path = require('path');
 const {
   parseArgs,
   safeSnapshotSummary,
+  persistObservation,
   collectOnce,
   runCollector
 } = require('../snapshot-collector');
 const { DurableObservationQueue } = require('../collector/queue');
+const { listRawSnapshots } = require('../collector/raw-retention');
 const { parseSnapshot } = require('../domain/snapshot');
 
 function tempDir() {
@@ -77,6 +79,98 @@ assert.strictEqual(parseSnapshot(emptySnapshot, { observedAt: '2026-08-22T00:00:
   assert.strictEqual(failed.ok, false);
   assert.strictEqual(fs.readdirSync(failedDir).filter(file => file !== 'manifest.jsonl').length, 1);
   assert.strictEqual(failedQueue.status().pending, 1);
+
+  const retainedDir = tempDir();
+  const retainedQueue = new DurableObservationQueue(path.join(retainedDir, 'queue'));
+  const retainedOptions = parseArgs(['--once', '--output-dir', retainedDir, '--state-file', path.join(retainedDir, 'state.json')]);
+  fs.writeFileSync(path.join(retainedDir, 'settings.json'), '{}');
+  fs.writeFileSync(path.join(retainedDir, '20230101T000000000Z-incomplete.json.tmp'), 'partial');
+  const nestedDirectory = path.join(retainedDir, '20230101T000000000Z-directory.json');
+  fs.mkdirSync(nestedDirectory);
+  fs.writeFileSync(path.join(nestedDirectory, 'keep.json'), 'keep');
+  const linkedFile = path.join(retainedDir, '20230101T000000000Z-link.json');
+  fs.symlinkSync(path.join(retainedDir, 'settings.json'), linkedFile);
+  const observations = [];
+  const bodies = new Map();
+  let retainedNow = 1_700_000_000_000;
+  for (let index = 0; index < 25; index += 1) {
+    // Include invalid 2xx audit bodies and identical versions in the same limit.
+    const body = index === 1 || index === 24 ? invalidBody : payload;
+    const collected = await collectOnce(retainedOptions, {
+      queue: retainedQueue,
+      now: () => retainedNow,
+      requestSnapshot: async () => ({ statusCode: 200, body, durationMs: 1 })
+    });
+    observations.push(collected.metadata);
+    bodies.set(collected.metadata.observationId, body);
+    assert.deepStrictEqual(listRawSnapshots(retainedDir).sort(), observations.slice(-20).map(item => item.file).sort());
+    assert.deepStrictEqual(fs.readFileSync(collected.metadata.rawPath), body);
+    if (index === 0) fs.utimesSync(collected.metadata.rawPath, new Date('2099-01-01'), new Date('2099-01-01'));
+    retainedNow += 15_000;
+  }
+  assert.strictEqual(fs.existsSync(observations[0].rawPath), false, 'retention must use observation time, not mtime');
+  assert.strictEqual(fs.existsSync(observations[1].rawPath), false, 'old .bin audit bodies must be removed too');
+  assert.strictEqual(fs.readFileSync(path.join(retainedDir, 'settings.json'), 'utf8'), '{}');
+  assert.strictEqual(fs.readFileSync(path.join(retainedDir, '20230101T000000000Z-incomplete.json.tmp'), 'utf8'), 'partial');
+  assert.strictEqual(fs.readFileSync(path.join(nestedDirectory, 'keep.json'), 'utf8'), 'keep');
+  assert.ok(fs.lstatSync(linkedFile).isSymbolicLink());
+  assert.strictEqual(fs.readFileSync(path.join(retainedDir, 'manifest.jsonl'), 'utf8').trim().split('\n').length, 25);
+
+  const orphan = persistObservation({ statusCode: 200, body: payload }, retainedOptions, new Date(retainedNow));
+  bodies.set(orphan.observationId, payload);
+  retainedNow += 15_000;
+  for (const requestSnapshot of [
+    async () => ({ statusCode: 503, body: Buffer.from('unavailable') }),
+    async () => { throw new Error('timeout'); }
+  ]) {
+    const failure = await collectOnce(retainedOptions, { queue: retainedQueue, now: () => retainedNow, requestSnapshot });
+    assert.strictEqual(failure.ok, false);
+    assert.strictEqual(listRawSnapshots(retainedDir).length, 21, 'failed requests must not prune existing raw files');
+  }
+
+  const restarted = await runCollector(retainedOptions, {
+    queue: retainedQueue,
+    now: () => retainedNow,
+    requestSnapshot: async () => ({ statusCode: 200, body: payload })
+  });
+  assert.strictEqual(restarted.recoveredQueueItems, 1, 'startup must recover a body written before enqueue');
+  assert.strictEqual(restarted.successes, 1);
+  assert.strictEqual(listRawSnapshots(retainedDir).length, 20, 'scheduled collection must enforce the same limit');
+  const projected = await retainedQueue.process(async (body, item) => {
+    assert.deepStrictEqual(body, bodies.get(item.observationId) || (item.storedAsSnapshot ? payload : Buffer.alloc(0)));
+    return { status: item.validSnapshot ? 'projected' : 'invalid' };
+  });
+  assert.strictEqual(projected.length, 29);
+  assert.ok(projected.every(item => item.status === 'processed'), 'pruning must not lose any queued body');
+
+  const blockedPath = path.join(retainedDir, listRawSnapshots(retainedDir).at(-1));
+  const unlinkSync = fs.unlinkSync;
+  try {
+    fs.unlinkSync = filePath => {
+      if (filePath === blockedPath) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      return unlinkSync(filePath);
+    };
+    retainedNow += 15_000;
+    const cleanupFailed = await collectOnce(retainedOptions, {
+      queue: retainedQueue,
+      now: () => retainedNow,
+      requestSnapshot: async () => ({ statusCode: 200, body: payload })
+    });
+    assert.strictEqual(cleanupFailed.ok, true, 'cleanup errors must not turn a saved observation into a request failure');
+    assert.strictEqual(cleanupFailed.metadata.parseStatus, 'pending');
+    assert.strictEqual(retainedQueue.status().pending, 1);
+    assert.strictEqual(listRawSnapshots(retainedDir).length, 21);
+  } finally {
+    fs.unlinkSync = unlinkSync;
+  }
+  retainedNow += 15_000;
+  await collectOnce(retainedOptions, {
+    queue: retainedQueue,
+    now: () => retainedNow,
+    requestSnapshot: async () => ({ statusCode: 200, body: payload })
+  });
+  assert.strictEqual(listRawSnapshots(retainedDir).length, 20, 'next successful response must retry cleanup');
+  assert.strictEqual(fs.existsSync(blockedPath), false);
 
   let now = 0;
   let calls = 0;

@@ -30,6 +30,18 @@ function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-rat-ret
   assert.strictEqual(fs.existsSync(rawPath), false);
   assert.strictEqual(fs.existsSync(path.join(queueDir, 'processed', 'old-observation.body')), false);
 
+  const recentFiles = [];
+  for (let index = 0; index < 21; index += 1) {
+    const file = `20260821T010000${String(index).padStart(3, '0')}Z-42-retained.json`;
+    fs.writeFileSync(path.join(rawDir, file), 'retained-body');
+    fs.appendFileSync(path.join(rawDir, 'manifest.jsonl'), `${JSON.stringify({ observationId: `retained-${index}`, observedAt: oldAt, file, storedAsSnapshot: true, parseStatus: 'projected' })}\n`);
+    recentFiles.push(file);
+  }
+  const window = runRetention({ rawDir, queueDir, rawHours: 24, metadataDays: 62, now: new Date('2026-08-23T00:00:00Z'), dryRun: false });
+  assert.strictEqual(window.deleted, 1);
+  assert.strictEqual(fs.existsSync(path.join(rawDir, recentFiles[0])), false);
+  for (const file of recentFiles.slice(1)) assert.ok(fs.existsSync(path.join(rawDir, file)), 'the timer must preserve the latest 20 even after 24 hours');
+
   const gatedRoot = tempDir();
   const gatedRawDir = path.join(gatedRoot, 'raw');
   const gatedQueueDir = path.join(gatedRoot, 'queue');

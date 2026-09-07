@@ -93,16 +93,14 @@ const egresses = [{ id: 'A1', group: 'A' }, { id: 'B1', group: 'B' }, { id: 'A2'
   const queue = new DurableObservationQueue(path.join(root, 'queue'));
   const outputDir = path.join(root, 'raw');
   fs.mkdirSync(outputDir, { recursive: true });
-  const now = Date.parse('2026-08-23T12:00:00.000Z');
-  const oldBin = path.join(outputDir, 'old-response.bin');
-  const recentJson = path.join(outputDir, 'recent-response.json');
+  const oldBin = path.join(outputDir, '20260821T120000000Z-response-200-audit.bin');
   fs.writeFileSync(oldBin, 'old');
-  fs.writeFileSync(recentJson, 'recent');
-  fs.writeFileSync(path.join(outputDir, 'manifest.jsonl'), [
-    { observationId: 'old', observedAt: '2026-08-21T12:00:00.000Z', file: 'old-response.bin', storedAsSnapshot: true },
-    { observationId: 'recent', observedAt: '2026-08-23T11:59:00.000Z', file: 'recent-response.json', storedAsSnapshot: true }
-  ].map(item => JSON.stringify(item)).join('\n') + '\n');
-  assert.deepStrictEqual(rawRetentionBacklog(outputDir, now), { count: 1, bytes: 3 });
+  assert.deepStrictEqual(rawRetentionBacklog(outputDir), { count: 0, bytes: 0 }, 'old snapshots within the count limit are not a backlog');
+  for (let index = 0; index < 20; index += 1) {
+    fs.writeFileSync(path.join(outputDir, `20260823T115900${String(index).padStart(3, '0')}Z-42-recent.json`), 'recent');
+  }
+  fs.writeFileSync(path.join(outputDir, 'state.json'), '{}');
+  assert.deepStrictEqual(rawRetentionBacklog(outputDir), { count: 1, bytes: 3 });
   const options = parseArgs(['--once', '--output-dir', outputDir]);
   const failed = await collectOnce(options, {
     queue,

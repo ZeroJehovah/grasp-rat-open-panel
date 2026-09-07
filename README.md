@@ -8,7 +8,7 @@ panel deployment does not interrupt collection.
 
 ```text
 snapshot collector (daily candidate benchmark -> A/B active pool, 15s single-flight)
-  -> raw 24h spool + durable queue
+  -> latest 20 raw responses + durable queue
   -> validator / version deduplicator / projector
   -> PostgreSQL facts and current materializations
   -> Fastify /api/v1
@@ -20,6 +20,13 @@ responses are represented only by observation metadata; a successful but
 schema-invalid 2xx body is retained as a `.bin` audit body and queued as an
 invalid observation. The queue writes a temporary file, fsyncs it, and renames
 it before making the item processable.
+After each successful HTTP response has been stored and durably queued, the
+collector keeps only the latest 20 raw bodies by observation timestamp,
+including `.bin` audit bodies. Duplicate versions count as separate responses.
+At the current 15-second polling interval this normally covers about 5 minutes
+(about 10 minutes at a 30-second interval). Failed requests do not trigger cleanup.
+Pending and failed queue bodies remain available for projection/retry, and
+cleanup errors are logged and retried after the next successful response.
 The validator distinguishes `steady`, `warming_up`, and `invalid`; incomplete
 versions never bulk-close online intervals.
 
@@ -89,6 +96,10 @@ available as rollback-compatible wrappers.
 Migration `004_date_partitions.sql` keeps the date-keyed fact tables in a
 rolling daily-partition window while retaining a default partition as a safety
 net.
-The retention command removes raw bodies only after the PostgreSQL structured
-retention checkpoint and daily finalization succeed, and keeps observation
-metadata for at least 62 days.
+The retention command keeps observation metadata for at least 62 days. Its
+fallback cleanup of older raw bodies requires the PostgreSQL structured
+retention checkpoint and daily finalization to succeed, and always preserves
+the latest 20 raw bodies. Normal raw cleanup runs in the collector after every
+successful response and does not wait for this timer. Historical facts in
+PostgreSQL retain their existing retention window; deleted raw bodies can no
+longer be used for historical replay.

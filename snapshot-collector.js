@@ -11,6 +11,7 @@ const { EgressScheduler, loadEgressPlan, classifyFailure } = require('./collecto
 const { DurableObservationQueue } = require('./collector/queue');
 const { ProjectionEngine } = require('./domain/projector');
 const { diskFreeBytes } = require('./collector/health');
+const { pruneRawSnapshots } = require('./collector/raw-retention');
 
 const DEFAULT_ORIGIN = 'https://grasp-rat-game.h-e.top';
 const DEFAULT_PATH = '/snapshot';
@@ -258,14 +259,23 @@ function persistRequestError(error, options, observedAt, context = {}) {
   return metadata;
 }
 
-async function enqueueSnapshot(queue, metadata, body) {
-  if (!queue) return null;
-  return queue.enqueue({
+async function enqueueSnapshot(queue, metadata, body, options) {
+  const item = queue ? await queue.enqueue({
     ...metadata,
     observationId: metadata.observationId,
     observedAt: metadata.observedAt,
     rawPath: metadata.rawPath
-  }, metadata.storedAsSnapshot ? body : Buffer.alloc(0));
+  }, metadata.storedAsSnapshot ? body : Buffer.alloc(0)) : null;
+  // Pending/failed queue items have their own durable bodies. Prune only after
+  // enqueue succeeds, so a crash cannot remove the last recoverable copy.
+  if (metadata.storedAsSnapshot) {
+    const retention = pruneRawSnapshots(options.outputDir);
+    if (retention.deleted || retention.errors.length) {
+      const log = retention.errors.length ? console.error : console.log;
+      log(JSON.stringify({ type: 'raw-retention', ...retention }));
+    }
+  }
+  return item;
 }
 
 async function collectOnce(options, dependencies = {}) {
@@ -282,11 +292,11 @@ async function collectOnce(options, dependencies = {}) {
   try {
     const result = await request(options, clock, egress);
     const metadata = persistObservation(result, options, observedAt, context);
-    await enqueueSnapshot(dependencies.queue, metadata, Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.body || ''));
+    await enqueueSnapshot(dependencies.queue, metadata, Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.body || ''), options);
     return { ok: metadata.validSnapshot, metadata, result };
   } catch (error) {
     const metadata = persistRequestError(error, options, observedAt, { ...context, failureCategory: classifyFailure(null, error) });
-    await enqueueSnapshot(dependencies.queue, metadata, Buffer.alloc(0));
+    await enqueueSnapshot(dependencies.queue, metadata, Buffer.alloc(0), options);
     return { ok: false, metadata, error };
   }
 }
@@ -311,7 +321,7 @@ async function runAttempt(options, dependencies, scheduler, egress, queue, retry
   const metadata = error
     ? persistRequestError(error, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory })
     : persistObservation(result, options, observedAt, { egressId: egress.id, egressGroup: egress.group, retryNo, failureCategory });
-  await enqueueSnapshot(queue, metadata, error ? Buffer.alloc(0) : result.body);
+  await enqueueSnapshot(queue, metadata, error ? Buffer.alloc(0) : result.body, options);
   return {
     ok: Boolean(!error && metadata.validSnapshot),
     metadata,

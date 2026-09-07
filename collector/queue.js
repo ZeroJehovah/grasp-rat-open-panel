@@ -259,8 +259,8 @@ class DurableObservationQueue {
       const bodyPath = path.join(this.processed, file);
       const metadataPath = path.join(this.processed, file.replace(/\.body$/, '.json'));
       // A processed metadata file is the durable commit marker. Keep the
-      // metadata for retention/audit, but the body is already preserved in
-      // raw-snapshots and is no longer needed for queue recovery.
+      // metadata for retention/audit; the committed body is no longer needed
+      // for queue recovery, even after its raw snapshot leaves the window.
       if (!readJson(metadataPath)) continue;
       try {
         fs.unlinkSync(bodyPath);

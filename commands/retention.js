@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Client } = require('pg');
+const { RAW_SNAPSHOT_LIMIT, listRawSnapshots } = require('../collector/raw-retention');
 
 function parseArgs(argv) {
   const options = {
@@ -43,6 +44,7 @@ function runRetention(options) {
   const root = path.resolve(options.rawDir);
   const manifestPath = path.join(root, 'manifest.jsonl');
   const records = readManifest(manifestPath);
+  const retainedFiles = new Set(fs.existsSync(root) ? listRawSnapshots(root).slice(0, RAW_SNAPSHOT_LIMIT) : []);
   const observedAtByObservationId = new Map(records.map(record => [record.observationId, record.observedAt || record.observed_at]));
   const committed = new Set();
   const processedDir = path.join(path.resolve(options.queueDir), 'processed');
@@ -62,6 +64,8 @@ function runRetention(options) {
   let skippedNotCommitted = 0;
   const errors = [];
   for (const record of rawDeletionAllowed ? records : []) {
+    // The timer must preserve the collector's latest window even after a long outage.
+    if (retainedFiles.has(record.file)) continue;
     const observedAt = Date.parse(record.observedAt || record.observed_at || '');
     if (!record.file || !record.storedAsSnapshot || !Number.isFinite(observedAt) || observedAt >= rawCutoff) continue;
     eligible += 1;
