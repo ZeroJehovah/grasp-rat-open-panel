@@ -24,6 +24,30 @@ const KILL_COLUMNS = `ke.local_date::text, ke.kill_id, ke.message_id, ke.event_a
   ke.victim_stamina_5s, ke.victim_stamina_5s_limit, ke.parser_version`;
 const KILL_FROM = 'FROM panel_kill_events ke LEFT JOIN panel_player_current pk ON pk.user_id = ke.killer_user_id LEFT JOIN panel_player_current pv ON pv.user_id = ke.victim_user_id';
 
+function compactVersionRecord(version) {
+  return {
+    snapshot_id: version.snapshot_id,
+    snapshot_key: version.snapshot_key,
+    version_token: version.version_token || version.snapshot_id,
+    server_day: String(version.server_day).slice(0, 10),
+    reset_generation: Number(version.reset_generation),
+    server_tick: Number(version.server_tick),
+    observed_at: version.observed_at,
+    received_at: version.received_at,
+    entity_count: Number(version.entity_count),
+    total_entities: version.total_entities === null || version.total_entities === undefined ? null : Number(version.total_entities),
+    bullet_count: version.bullet_count === null || version.bullet_count === undefined ? null : Number(version.bullet_count),
+    coin_drop_count: version.coin_drop_count === null || version.coin_drop_count === undefined ? null : Number(version.coin_drop_count),
+    message_count: version.message_count === null || version.message_count === undefined ? null : Number(version.message_count),
+    payload_hash: version.payload_hash,
+    completeness: version.completeness,
+    schema_version: version.schema_version,
+    duplicate_poll_count: Number(version.duplicate_poll_count || 0),
+    observation_ids: [],
+    errors: []
+  };
+}
+
 function numberOrNull(value) {
   if (value === null || value === undefined) return null;
   const number = Number(value);
@@ -77,6 +101,19 @@ function compactEngine(engine) {
   // API from there; retaining them in the worker only increases heap and GC
   // work as retention advances.
   const currentDay = engine.lastVersion?.server_day || engine.lastStableVersion?.server_day || null;
+  // The worker only needs a compact version index for duplicate keys and
+  // evidence ordering. Drop observation arrays/errors and other hydration
+  // detail after the transaction; PostgreSQL remains the full historical
+  // source for audit and API queries.
+  if (engine.versions.length) {
+    const latestId = engine.lastVersion?.snapshot_id;
+    const latestStableId = engine.lastStableVersion?.snapshot_id;
+    engine.versions = engine.versions.map(compactVersionRecord);
+    engine.versionByKey = new Map(engine.versions.map(version => [version.snapshot_key, version]));
+    engine.versionById = new Map(engine.versions.map(version => [version.snapshot_id, version]));
+    engine.lastVersion = engine.versionById.get(latestId) || engine.versions.at(-1) || null;
+    engine.lastStableVersion = engine.versionById.get(latestStableId) || null;
+  }
   if (currentDay) {
     const eventDays = new Set([...engine.messages.values(), ...engine.kills.values()]
       .map(row => String(row.server_day).slice(0, 10)).filter(Boolean));
