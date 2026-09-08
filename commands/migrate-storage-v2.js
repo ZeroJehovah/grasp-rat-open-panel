@@ -114,6 +114,13 @@ async function backfill(client) {
     WHERE kills <> 0 OR deaths <> 0 OR income IS NULL OR income <> 0 OR quota_top_candidate
   `);
 
+  // Rows from closed days must not block the first compact retention run. This
+  // also covers players whose only retained fact is a daily stat without a
+  // corresponding quota row.
+  await client.query(`UPDATE panel_daily_summary
+    SET finalized_at = COALESCE(finalized_at, now())
+    WHERE local_date < (now() AT TIME ZONE 'Asia/Shanghai')::date`);
+
   await client.query(`
     INSERT INTO panel_message_events (
       server_day, message_id, tick, kind, text, user_id, target_user_id,
