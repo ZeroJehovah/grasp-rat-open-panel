@@ -287,9 +287,9 @@ class CompactPostgresPanelStore {
       if (!keep) continue;
       const q = quotas.find(item => String(item.user_id) === uid) || {};
       const status = !hasQuota ? 'absent' : income === null ? 'unknown' : 'known';
-      await client.query(`INSERT INTO panel_daily_summary (local_date,user_id,kills,deaths,initial_quota,closing_quota,income,quota_status,quota_top_candidate,source_snapshot_id,updated_at)
-        VALUES ($1::date,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
-        ON CONFLICT (local_date,user_id) DO UPDATE SET kills=EXCLUDED.kills,deaths=EXCLUDED.deaths,initial_quota=COALESCE(panel_daily_summary.initial_quota,EXCLUDED.initial_quota),closing_quota=EXCLUDED.closing_quota,income=EXCLUDED.income,quota_status=EXCLUDED.quota_status,quota_top_candidate=EXCLUDED.quota_top_candidate,source_snapshot_id=EXCLUDED.source_snapshot_id,updated_at=now()`, [
+      await client.query(`INSERT INTO panel_daily_summary (local_date,user_id,kills,deaths,initial_quota,closing_quota,income,quota_status,quota_top_candidate,source_snapshot_id,finalized_at,updated_at)
+        VALUES ($1::date,$2,$3,$4,$5,$6,$7,$8,$9,$10,CASE WHEN $1::date < (now() AT TIME ZONE 'Asia/Shanghai')::date THEN now() ELSE NULL END,now())
+        ON CONFLICT (local_date,user_id) DO UPDATE SET kills=EXCLUDED.kills,deaths=EXCLUDED.deaths,initial_quota=COALESCE(panel_daily_summary.initial_quota,EXCLUDED.initial_quota),closing_quota=EXCLUDED.closing_quota,income=EXCLUDED.income,quota_status=EXCLUDED.quota_status,quota_top_candidate=EXCLUDED.quota_top_candidate,source_snapshot_id=EXCLUDED.source_snapshot_id,finalized_at=COALESCE(panel_daily_summary.finalized_at,EXCLUDED.finalized_at),updated_at=now()`, [
         day, Number(uid), kills, deaths, q.initial_quota ?? null, q.closing_quota ?? null, income, status, topIds.has(uid), sourceSnapshotId
       ]);
     }
