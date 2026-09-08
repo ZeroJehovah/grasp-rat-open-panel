@@ -14,7 +14,8 @@ async function main() {
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
-    const result = await client.query(`UPDATE player_daily_quota
+    const table = process.env.PANEL_STORAGE_MODE === 'legacy' ? 'player_daily_quota' : 'panel_daily_summary';
+    const result = await client.query(`UPDATE ${table}
       SET finalized_at = COALESCE(finalized_at, now())
       WHERE local_date = $1::date`, [day]);
     console.log(JSON.stringify({ type: 'day-finalized', localDate: day, rows: result.rowCount }));

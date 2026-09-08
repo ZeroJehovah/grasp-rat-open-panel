@@ -4,7 +4,7 @@ Backups are custom-format `pg_dump` files written under the private data
 directory. `backup-postgres.sh` reads `DATABASE_URL` from the process
 environment and never stores it in the repository.
 
-For a drill, restore into a new empty database and run the migration/checks
+For a storage-v2 dump, restore into a new empty database and run the migration
 before changing the production connection string:
 
 ```bash
@@ -14,7 +14,13 @@ DATABASE_URL=postgresql://.../grasp_rat_panel_restore npm run migrate
 DATABASE_URL=postgresql://.../grasp_rat_panel_restore node commands/finalize-day.js 2026-08-22
 ```
 
-Compare `snapshot_versions`, `player_daily_quota`, `message_events` and
-`kill_events` counts with the source database. Restore validation is isolated
-from the live collector and API; do not point the services at the restore
-database until the comparison is complete.
+Check that only `panel_*` tables are present, compare compact table counts and
+date ranges with the source database, and exercise `/healthz`, `/api/v1/meta`
+and one realtime and one history resource against the restore database.
+
+For a pre-storage-v2 dump, `npm run migrate` creates the compatibility schema;
+then run `node commands/migrate-storage-v2.js` in the restore database, compare
+the old/new counts, and use `node commands/migrate-storage-v2.js --skip-backfill
+--drop-old` only after the comparison succeeds. Restore validation is isolated
+from the live collector and API; do not point services at the restore database
+until the comparison is complete.

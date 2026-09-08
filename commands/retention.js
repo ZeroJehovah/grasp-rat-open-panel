@@ -132,13 +132,20 @@ async function runDatabaseRetention(options) {
   try {
     await client.query('BEGIN');
     const anchor = businessDate(options.now.getTime());
-    await client.query('SELECT ensure_panel_date_partitions($1::date)', [anchor]);
-    const open = await client.query('SELECT count(*)::int AS count FROM player_daily_quota WHERE local_date < $1::date AND finalized_at IS NULL', [boundary]);
+    const compact = process.env.PANEL_STORAGE_MODE !== 'legacy';
+    if (!compact) await client.query('SELECT ensure_panel_date_partitions($1::date)', [anchor]);
+    const open = await client.query(`SELECT count(*)::int AS count FROM ${compact ? 'panel_daily_summary' : 'player_daily_quota'} WHERE local_date < $1::date AND finalized_at IS NULL`, [boundary]);
     if (Number(open.rows[0]?.count || 0) > 0) {
       await client.query('ROLLBACK');
       return { skipped: true, reason: 'daily_quota_not_finalized', boundaryDate: boundary, openRows: Number(open.rows[0].count) };
     }
-    const statements = [
+    const statements = compact ? [
+      ['panel_message_events', 'DELETE FROM panel_message_events WHERE server_day < $1::date'],
+      ['panel_kill_events', 'DELETE FROM panel_kill_events WHERE local_date < $1::date'],
+      ['panel_daily_summary', 'DELETE FROM panel_daily_summary WHERE local_date < $1::date'],
+      ['panel_version_dedupe', 'DELETE FROM panel_version_dedupe WHERE server_day < $1::date'],
+      ['panel_day_status', 'DELETE FROM panel_day_status WHERE server_day < $1::date']
+    ] : [
       ['state_checkpoint', `INSERT INTO player_state_base (snapshot_id, user_id, segment_id, schema_version, state, observed_at)
         SELECT c.snapshot_id, c.user_id, c.segment_id, COALESCE(s.schema_version, 'snapshot-v1'), c.state, c.observed_at
         FROM player_state_current c
@@ -160,9 +167,13 @@ async function runDatabaseRetention(options) {
     ];
     const rows = {};
     for (const [name, sql, values = [boundary]] of statements) rows[name] = Number((await client.query(sql, values)).rowCount || 0);
-    const partitionResult = await client.query('SELECT prune_panel_date_partitions($1::date) AS dropped', [boundary]);
-    const detail = { rows, droppedPartitions: partitionResult.rows[0]?.dropped || {} };
-    await client.query('INSERT INTO retention_audit (action, boundary_date, rows_affected, detail) VALUES ($1, $2::date, $3, $4::jsonb)', ['structured_retention', boundary, Object.values(rows).reduce((sum, value) => sum + value, 0), JSON.stringify(detail)]);
+    const partitionResult = compact ? null : await client.query('SELECT prune_panel_date_partitions($1::date) AS dropped', [boundary]);
+    const detail = { rows, droppedPartitions: partitionResult?.rows[0]?.dropped || {} };
+    if (compact) {
+      await client.query('INSERT INTO panel_retention_audit (boundary_date, rows_affected, detail) VALUES ($1::date, $2, $3::jsonb)', [boundary, Object.values(rows).reduce((sum, value) => sum + value, 0), JSON.stringify(detail)]);
+    } else {
+      await client.query('INSERT INTO retention_audit (action, boundary_date, rows_affected, detail) VALUES ($1, $2::date, $3, $4::jsonb)', ['structured_retention', boundary, Object.values(rows).reduce((sum, value) => sum + value, 0), JSON.stringify(detail)]);
+    }
     await client.query('COMMIT');
     return { skipped: false, boundaryDate: boundary, rows, droppedPartitions: detail.droppedPartitions };
   } catch (error) {

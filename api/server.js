@@ -8,6 +8,7 @@ const fastifyCompress = require('@fastify/compress');
 
 const { ProjectionEngine } = require('../domain/projector');
 const { HISTORY_ROW_LIMITS, PostgresPanelStore } = require('../storage/postgres-store');
+const { CompactPostgresPanelStore } = require('../storage/compact-postgres-store');
 const { collectorHealth } = require('../collector/health');
 const { ResponseCache, TtlMemo, ifNoneMatchSatisfied, negotiateEncoding } = require('./cache');
 const { historyPageCacheKey, parseHistoryPageQuery, sliceHistoryPage } = require('./history-page');
@@ -141,7 +142,10 @@ function serverDayOf(latest) {
 
 function buildStore(options = {}) {
   if (options.store) return options.store;
-  if (options.connectionString || process.env.DATABASE_URL) return new PostgresPanelStore({ connectionString: options.connectionString || process.env.DATABASE_URL });
+  if (options.connectionString || process.env.DATABASE_URL) {
+    if (options.storageMode === 'legacy' || process.env.PANEL_STORAGE_MODE === 'legacy') return new PostgresPanelStore({ connectionString: options.connectionString || process.env.DATABASE_URL });
+    return new CompactPostgresPanelStore({ connectionString: options.connectionString || process.env.DATABASE_URL });
+  }
   return new ProjectionEngine(options);
 }
 

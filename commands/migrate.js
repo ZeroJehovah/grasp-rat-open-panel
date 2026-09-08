@@ -11,7 +11,15 @@ async function main() {
   await client.connect();
   try {
     const directory = path.resolve(__dirname, '../db/migrations');
-    for (const file of fs.readdirSync(directory).filter(name => name.endsWith('.sql')).sort()) {
+    const storageV2 = await client.query(`SELECT to_regclass('public.panel_storage_migration') IS NOT NULL AS present`).then(result => result.rows[0]?.present === true);
+    const files = fs.readdirSync(directory).filter(name => name.endsWith('.sql')).sort().filter(file => {
+      // Once storage-v2 has been cut over and the legacy tables have been
+      // dropped, replaying 001-007 would silently recreate the data model we
+      // intentionally removed. Fresh databases still run the complete chain.
+      if (!storageV2) return true;
+      return !/^00[1-7]_/.test(file);
+    });
+    for (const file of files) {
       const sql = fs.readFileSync(path.join(directory, file), 'utf8');
       await client.query(sql);
       console.log(JSON.stringify({ migration: file, status: 'applied' }));

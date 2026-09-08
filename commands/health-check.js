@@ -104,8 +104,9 @@ async function databaseHealth(connectionString, now = new Date()) {
     // advancing, so they must not be gated on completeness: a world reset makes
     // every version warming-up for as long as the entity set takes to grow back,
     // which reported a growing lag while the pipeline was perfectly healthy.
+    const versionTable = process.env.PANEL_STORAGE_MODE === 'legacy' ? 'snapshot_versions' : 'panel_version_dedupe';
     const result = await client.query(`SELECT observed_at
-      FROM snapshot_versions
+      FROM ${versionTable}
       ORDER BY observed_at DESC
       LIMIT 2`);
     const latest = result.rows[0]?.observed_at ? Date.parse(result.rows[0].observed_at) : NaN;

@@ -38,7 +38,15 @@ npm test
 npm run typecheck
 npm run lint
 npm run frontend:build
+npm run migrate
 ```
+
+The production database uses the compact storage-v2 model. For a database
+created from the pre-storage-v2 schema, follow the private
+`docs/storage-v2-migration.md` operation record: run `npm run migrate`,
+backfill with `node commands/migrate-storage-v2.js`, verify the counts, and
+only then run it with `--skip-backfill --drop-old` to remove the legacy tables.
+The normal projector and API use storage-v2 automatically.
 
 Replay a local raw window without writing secrets or raw data to Git:
 
@@ -93,13 +101,8 @@ Each resource response carries `generatedAt`, `timezone`, `schemaVersion` and
 resources carry `from`, `to` and the applicable closed-through date. The old
 aggregate `/api/v1/realtime` and `/api/v1/history` endpoints remain temporarily
 available as rollback-compatible wrappers.
-Migration `004_date_partitions.sql` keeps the date-keyed fact tables in a
-rolling daily-partition window while retaining a default partition as a safety
-net.
-The retention command keeps observation metadata for at least 62 days. Its
-fallback cleanup of older raw bodies requires the PostgreSQL structured
-retention checkpoint and daily finalization to succeed, and always preserves
-the latest 20 raw bodies. Normal raw cleanup runs in the collector after every
-successful response and does not wait for this timer. Historical facts in
-PostgreSQL retain their existing retention window; deleted raw bodies can no
-longer be used for historical replay.
+Storage-v2 keeps one current row per player, compact daily summaries, and the
+deduplicated message/kill facts required by the page. The retention command
+cleans those compact facts by business date, while the collector keeps only
+the latest 20 raw bodies. Historical facts retain the configured 62-day
+window; deleted raw bodies can no longer be used for historical replay.

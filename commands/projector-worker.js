@@ -3,10 +3,10 @@
 
 const path = require('path');
 const { DurableObservationQueue } = require('../collector/queue');
-const { PostgresPanelStore } = require('../storage/postgres-store');
+const { CompactPostgresPanelStore } = require('../storage/compact-postgres-store');
 
 const queue = new DurableObservationQueue(process.env.GRASP_RAT_PANEL_QUEUE_DIR || path.resolve(__dirname, '../../data/spool'));
-const store = new PostgresPanelStore({ connectionString: process.env.DATABASE_URL });
+const store = new CompactPostgresPanelStore({ connectionString: process.env.DATABASE_URL });
 let stopping = false;
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 

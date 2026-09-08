@@ -8,11 +8,10 @@
     "test": "node test/snapshot-collector.test.js && node test/collector.test.js && node test/domain.test.js && node test/api.test.js && node test/cache.test.js && node test/history-cache.test.js && node test/retention.test.js && node test/health-check.test.js && node test/backfill.test.js",
     "collect:once": "node snapshot-collector.js --once",
     "replay": "node commands/replay-snapshots.js",
-    "backfill:postgres": "node commands/backfill-postgres.js",
     "migrate": "node commands/migrate.js",
+    "migrate:storage-v2": "node commands/migrate-storage-v2.js",
     "projector": "node commands/projector-worker.js",
     "finalize-day": "node commands/finalize-day.js",
-    "rebuild-quota": "node commands/rebuild-quota-from-snapshots.js",
     "refresh-map": "node commands/refresh-map-metadata.js",
     "retention": "node commands/retention.js",
     "api": "node api/index.js",
@@ -22,8 +21,7 @@
     "build": "npm run frontend:build",
     "typecheck": "tsc --noEmit -p frontend/tsconfig.json",
     "lint": "eslint frontend/src frontend/*.ts",
-    "check": "npm test && npm run typecheck && npm run lint && npm run frontend:build",
-    "verify:history": "node commands/verify-history-equivalence.js"
+    "check": "npm test && npm run typecheck && npm run lint && npm run frontend:build"
   },
   "engines": {
     "node": ">=20"
