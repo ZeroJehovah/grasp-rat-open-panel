@@ -46,7 +46,8 @@ created from the pre-storage-v2 schema, follow the private
 `docs/storage-v2-migration.md` operation record: run `npm run migrate`,
 backfill with `node commands/migrate-storage-v2.js`, verify the counts, and
 only then run it with `--skip-backfill --drop-old` to remove the legacy tables.
-The normal projector and API use storage-v2 automatically.
+On a new empty database, `npm run migrate` starts at storage-v2 directly. The
+normal projector and API use storage-v2 automatically.
 
 Replay a local raw window without writing secrets or raw data to Git:
 

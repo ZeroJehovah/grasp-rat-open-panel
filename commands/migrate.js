@@ -12,12 +12,18 @@ async function main() {
   try {
     const directory = path.resolve(__dirname, '../db/migrations');
     const storageV2 = await client.query(`SELECT to_regclass('public.panel_storage_migration') IS NOT NULL AS present`).then(result => result.rows[0]?.present === true);
+    const legacyTables = await client.query(`SELECT (
+      to_regclass('public.snapshot_observations') IS NOT NULL OR
+      to_regclass('public.snapshot_versions') IS NOT NULL OR
+      to_regclass('public.players') IS NOT NULL
+    ) AS present`).then(result => result.rows[0]?.present === true);
     const files = fs.readdirSync(directory).filter(name => name.endsWith('.sql')).sort().filter(file => {
-      // Once storage-v2 has been cut over and the legacy tables have been
-      // dropped, replaying 001-007 would silently recreate the data model we
-      // intentionally removed. Fresh databases still run the complete chain.
-      if (!storageV2) return true;
-      return !/^00[1-7]_/.test(file);
+      const version = Number(file.slice(0, 3));
+      // A new database starts directly at storage-v2. An existing legacy
+      // database must first run 001-007 so the backfill command can read it.
+      // After 008 has run, never replay the tables that the cutover removes.
+      if (!storageV2 && !legacyTables) return version >= 8;
+      return version >= 8 || legacyTables;
     });
     for (const file of files) {
       const sql = fs.readFileSync(path.join(directory, file), 'utf8');
