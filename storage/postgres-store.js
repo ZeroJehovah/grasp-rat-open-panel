@@ -214,6 +214,7 @@ class PostgresPanelStore {
     engine.versions = versions;
     for (const version of versions) {
       engine.versionByKey.set(`${version.server_day}/${version.reset_generation}/${version.server_tick}/${version.payload_hash}`, version);
+      engine.versionById.set(version.snapshot_id, version);
     }
     const latestStable = versions.filter(version => version.completeness === 'steady').at(-1) || null;
     const latestObserved = latestObservedResult.rows[0] || null;
@@ -294,8 +295,18 @@ class PostgresPanelStore {
     for (const row of namesResult.rows) engine.nameHistory.set(mapKey(row.user_id, row.name), { ...row, user_id: Number(row.user_id) });
     for (const row of entitiesResult.rows) engine.entityHistory.set(mapKey(row.user_id, row.entity_id, row.reset_generation), { ...row, user_id: Number(row.user_id), entity_id: Number(row.entity_id), reset_generation: Number(row.reset_generation) });
     for (const row of messagesResult.rows) engine.messages.set(String(row.message_id), { ...row, message_id: String(row.message_id), server_day: String(row.server_day).slice(0, 10), local_date: String(row.server_day).slice(0, 10), event_at: toDate(row.event_at), first_observed_at: toDate(row.first_observed_at), last_observed_at: toDate(row.last_observed_at) });
-    for (const row of killsResult.rows) engine.kills.set(String(row.kill_id), { ...row, kill_id: String(row.kill_id), message_id: String(row.message_id), local_date: String(row.local_date).slice(0, 10), server_day: String(row.server_day).slice(0, 10), event_at: toDate(row.event_at), victim_position: row.victim_position, killer_position: row.killer_position, victim_stamina_5s: row.victim_stamina_5s === null ? null : Number(row.victim_stamina_5s), victim_stamina_5s_limit: row.victim_stamina_5s_limit === null ? null : Number(row.victim_stamina_5s_limit) });
-    for (const row of dropsResult.rows) engine.drops.set(mapKey(row.server_day, row.drop_id), { ...row, server_day: String(row.server_day).slice(0, 10), drop_id: Number(row.drop_id), first_seen_at: toDate(row.first_seen_at), last_seen_at: toDate(row.last_seen_at), disappeared_at: row.disappeared_at ? toDate(row.disappeared_at) : null });
+    for (const row of killsResult.rows) {
+      engine.kills.set(String(row.kill_id), { ...row, kill_id: String(row.kill_id), message_id: String(row.message_id), local_date: String(row.local_date).slice(0, 10), server_day: String(row.server_day).slice(0, 10), event_at: toDate(row.event_at), victim_position: row.victim_position, killer_position: row.killer_position, victim_stamina_5s: row.victim_stamina_5s === null ? null : Number(row.victim_stamina_5s), victim_stamina_5s_limit: row.victim_stamina_5s_limit === null ? null : Number(row.victim_stamina_5s_limit) });
+      engine.pendingKillIds.add(String(row.kill_id));
+    }
+    for (const row of dropsResult.rows) {
+      const drop = { ...row, server_day: String(row.server_day).slice(0, 10), drop_id: Number(row.drop_id), first_seen_at: toDate(row.first_seen_at), last_seen_at: toDate(row.last_seen_at), disappeared_at: row.disappeared_at ? toDate(row.disappeared_at) : null };
+      engine.drops.set(mapKey(row.server_day, row.drop_id), drop);
+      const matchKey = mapKey(drop.server_day, drop.created_tick, drop.source_user_id);
+      const matches = engine.dropByMatch.get(matchKey) || [];
+      matches.push(drop);
+      engine.dropByMatch.set(matchKey, matches);
+    }
     for (const row of statsResult.rows) engine.dailyStats.set(mapKey(row.local_date, row.user_id), { ...row, local_date: String(row.local_date).slice(0, 10), user_id: Number(row.user_id), kills: Number(row.kills), deaths: Number(row.deaths) });
     // Kill events are the durable de-duplicated source for daily stats. This
     // reconstruction also covers a crash after a warming-up kill was stored

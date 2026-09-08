@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('assert');
+const crypto = require('crypto');
 const { addDays, isDateRangeCovered, parseSnapshot, presetRangesForDates } = require('../domain/snapshot');
 const { ProjectionEngine } = require('../domain/projector');
 
@@ -91,6 +92,23 @@ function observation(engine, value, time) {
   assert.strictEqual(warming.completeness, 'warming_up');
   const invalid = parseSnapshot(Buffer.from('{bad'), { observedAt: '2026-08-22T00:00:00+08:00' });
   assert.strictEqual(invalid.completeness, 'invalid');
+})();
+
+// The collector already computed this hash before enqueueing the body. A
+// consecutive duplicate can therefore skip JSON parsing and projection work
+// while still producing a durable queue terminal status.
+(() => {
+  const engine = new ProjectionEngine({ minSteadyEntities: 1 });
+  const payload = body(100);
+  const payloadHash = crypto.createHash('sha256').update(payload).digest('hex');
+  const first = engine.applyObservation(payload, { observationId: 'hash-first', observedAt: '2026-08-22T00:01:00+08:00', payloadHash, statusCode: 200 });
+  const duplicate = engine.applyObservation(payload, { observationId: 'hash-duplicate', observedAt: '2026-08-22T00:01:30+08:00', payloadHash, statusCode: 200 });
+  assert.strictEqual(first.status, 'projected');
+  assert.strictEqual(duplicate.status, 'duplicate');
+  assert.strictEqual(duplicate.parsed.entities.length, 0, 'fast duplicate path must not parse entity rows');
+  assert.strictEqual(engine.versions.length, 1);
+  assert.strictEqual(engine.versions[0].duplicate_poll_count, 1);
+  assert.strictEqual(engine.observations.length, 2);
 })();
 
 // 回归：世界重启后实体集要好几分钟才长回来。实时读必须跟着正在恢复的世界走，不能

@@ -72,7 +72,31 @@ function toState(entity, parsed, version, segmentId, online = true) {
 
 function compactEngine(engine) {
   // The compact store does not rebuild a base/delta chain after restart. Keep
-  // only the maps used by the live projector and the event/daily facts.
+  // only the maps used by the live projector and the current business day.
+  // Historical facts are already durable in PostgreSQL and are served by the
+  // API from there; retaining them in the worker only increases heap and GC
+  // work as retention advances.
+  const currentDay = engine.lastVersion?.server_day || engine.lastStableVersion?.server_day || null;
+  if (currentDay) {
+    const eventDays = new Set([...engine.messages.values(), ...engine.kills.values()]
+      .map(row => String(row.server_day).slice(0, 10)).filter(Boolean));
+    const retainedEventDays = new Set([...eventDays].sort().slice(-2));
+    retainedEventDays.add(currentDay);
+    engine.messages = new Map([...engine.messages].filter(([, row]) => retainedEventDays.has(String(row.server_day).slice(0, 10))));
+    engine.kills = new Map([...engine.kills].filter(([, row]) => retainedEventDays.has(String(row.server_day).slice(0, 10))));
+    engine.drops = new Map([...engine.drops].filter(([, row]) => String(row.server_day).slice(0, 10) === currentDay));
+    engine.dailyStats = new Map([...engine.dailyStats].filter(([, row]) => String(row.local_date).slice(0, 10) === currentDay));
+    engine.dailyQuota = new Map([...engine.dailyQuota].filter(([, row]) => String(row.local_date).slice(0, 10) === currentDay));
+    engine.dailyTopCandidates = new Map([...engine.dailyTopCandidates].filter(([day]) => day === currentDay));
+    engine.pendingKillIds = new Set([...engine.pendingKillIds].filter(killId => engine.kills.has(killId)));
+    engine.dropByMatch = new Map();
+    for (const drop of engine.drops.values()) {
+      const key = `${drop.server_day}:${drop.created_tick}:${drop.source_user_id}`;
+      const matches = engine.dropByMatch.get(key) || [];
+      matches.push(drop);
+      engine.dropByMatch.set(key, matches);
+    }
+  }
   engine.stateBases = [];
   engine.stateDeltas = [];
   engine.onlineIntervals = [];
@@ -87,6 +111,7 @@ class CompactPostgresPanelStore {
     this.pool = options.pool || new Pool({ connectionString: options.connectionString || process.env.DATABASE_URL });
     this.engine = options.engine || new ProjectionEngine(options);
     this.ownsPool = !options.pool;
+    this.persistedMapFingerprint = null;
   }
 
   async close() { if (this.ownsPool) await this.pool.end(); }
@@ -108,7 +133,10 @@ class CompactPostgresPanelStore {
       this.query('SELECT payload FROM panel_map_metadata ORDER BY updated_at DESC LIMIT 1')
     ]);
     this.engine.reset();
-    if (map.rows[0]?.payload) this.engine.mapMetadata = cloneJson(map.rows[0].payload);
+    if (map.rows[0]?.payload) {
+      this.engine.mapMetadata = cloneJson(map.rows[0].payload);
+      this.persistedMapFingerprint = `${this.engine.mapMetadata.id}:${this.engine.mapMetadata.version}:${JSON.stringify(this.engine.mapMetadata)}`;
+    }
     this.engine.versions = versions.rows.map(row => ({
       ...row,
       snapshot_key: row.snapshot_key,
@@ -118,6 +146,7 @@ class CompactPostgresPanelStore {
       errors: []
     }));
     this.engine.versionByKey = new Map(this.engine.versions.map(row => [row.snapshot_key, row]));
+    this.engine.versionById = new Map(this.engine.versions.map(row => [row.snapshot_id, row]));
     this.engine.lastVersion = this.engine.versions.at(-1) || null;
     this.engine.lastStableVersion = [...this.engine.versions].reverse().find(row => row.completeness === 'steady') || null;
     const latest = this.engine.lastVersion;
@@ -131,7 +160,8 @@ class CompactPostgresPanelStore {
       });
       if (row.snapshot_id) {
         this.engine.currentStates.set(uid, {
-          ...(row.state || {}), user_id: Number(row.user_id), entity_id: row.current_entity_id,
+          ...(row.state || {}), user_id: Number(row.user_id), name: row.current_name || '',
+          entity_id: row.current_entity_id === null ? null : Number(row.current_entity_id),
           snapshot_id: row.snapshot_id, observed_at: row.observed_at, server_day: row.server_day,
           reset_generation: row.reset_generation, segment_id: `compact-${uid}`, online: Boolean(row.online)
         });
@@ -152,6 +182,7 @@ class CompactPostgresPanelStore {
         server_day: String(row.server_day).slice(0, 10),
         drop: row.drop, victim_position: row.victim_position, killer_position: row.killer_position
       });
+      this.engine.pendingKillIds.add(String(row.kill_id));
     }
     for (const row of summaries.rows) {
       const localDate = String(row.local_date).slice(0, 10);
@@ -161,6 +192,11 @@ class CompactPostgresPanelStore {
         local_date: localDate, user_id: uid, initial_quota: numberOrNull(row.initial_quota), closing_quota: numberOrNull(row.closing_quota),
         income: row.income === null ? null : numberOrNull(row.income), finalized_at: row.finalized_at, source_snapshot_id: row.source_snapshot_id
       });
+      if (row.quota_top_candidate) {
+        const candidates = this.engine.dailyTopCandidates.get(localDate) || new Set();
+        candidates.add(String(uid));
+        this.engine.dailyTopCandidates.set(localDate, candidates);
+      }
     }
     compactEngine(this.engine);
     return { latestStable: this.engine.lastStableVersion, latestObserved: this.engine.lastVersion, users: this.engine.currentStates.size };
@@ -248,6 +284,78 @@ class CompactPostgresPanelStore {
     ]);
   }
 
+  currentRow(entity, parsed, version, online = true) {
+    const uid = String(entity.user_id);
+    const player = this.engine.players.get(uid) || { first_seen_at: version.observed_at, current_name: entity.name || '' };
+    const quota = this.engine.quotaCurrent.get(uid) || null;
+    const daily = this.engine.dailyQuota.get(`${parsed.serverDay}:${uid}`) || null;
+    const stat = this.engine.dailyStats.get(`${parsed.serverDay}:${uid}`) || null;
+    return [
+      entity.user_id, entity.name || player.current_name || '', player.first_seen_at || version.observed_at, version.observed_at,
+      entity.entity_id, online, parsed.serverDay, parsed.snapshotId, version.observed_at, parsed.resetGeneration,
+      numberOrNull(entity.x), numberOrNull(entity.y), numberOrNull(entity.hp), numberOrNull(entity.max_hp), numberOrNull(entity.invulnerable_remaining_secs),
+      numberOrNull(entity.stamina_5s_remaining_milli), numberOrNull(entity.stamina_5s_limit_milli), numberOrNull(entity.stamina_1h_remaining_milli), numberOrNull(entity.stamina_1h_limit_milli),
+      numberOrNull(entity.stamina_1d_remaining_milli), numberOrNull(entity.stamina_1d_limit_milli), entity.current_join_mode || null, entity.life || null,
+      numberOrNull(entity.death_drop_coins), numberOrNull(entity.death_loss_preview), numberOrNull(entity.external_balance_snapshot),
+      quota?.quota_day || parsed.serverDay, quota?.initial_quota ?? null, quota?.quota_value ?? null, quota?.quota_source || 'external_balance_snapshot',
+      stat?.kills || 0, stat?.deaths || 0, daily?.income ?? null, daily ? daily.income !== null : false
+    ];
+  }
+
+  async upsertCurrentBatch(client, entities, parsed, version) {
+    if (!entities.length) return;
+    const rows = entities.map(entity => this.currentRow(entity, parsed, version, true));
+    const values = [];
+    const tuples = rows.map(row => {
+      const placeholders = row.map((value, index) => {
+        values.push(value);
+        const parameter = `$${values.length}`;
+        if (index === 6 || index === 26) return `${parameter}::date`;
+        return parameter;
+      });
+      return `(${placeholders.join(',')},now())`;
+    });
+    await client.query(`INSERT INTO panel_player_current (
+      user_id, current_name, first_seen_at, last_seen_at, current_entity_id, online,
+      server_day, state_snapshot_id, state_observed_at, reset_generation,
+      x, y, hp, max_hp, invulnerable_remaining_secs, stamina_5s, stamina_5s_limit,
+      stamina_1h, stamina_1h_limit, stamina_1d, stamina_1d_limit, current_join_mode, life,
+      death_drop_coins, death_loss_preview, external_balance_snapshot,
+      quota_day, initial_quota, quota_value, quota_source,
+      today_kills, today_deaths, today_income, today_quota_known, updated_at
+    ) VALUES ${tuples.join(',')}
+    ON CONFLICT (user_id) DO UPDATE SET current_name=EXCLUDED.current_name,last_seen_at=EXCLUDED.last_seen_at,
+      current_entity_id=EXCLUDED.current_entity_id,online=EXCLUDED.online,server_day=EXCLUDED.server_day,
+      state_snapshot_id=EXCLUDED.state_snapshot_id,state_observed_at=EXCLUDED.state_observed_at,reset_generation=EXCLUDED.reset_generation,
+      x=EXCLUDED.x,y=EXCLUDED.y,hp=EXCLUDED.hp,max_hp=EXCLUDED.max_hp,invulnerable_remaining_secs=EXCLUDED.invulnerable_remaining_secs,
+      stamina_5s=EXCLUDED.stamina_5s,stamina_5s_limit=EXCLUDED.stamina_5s_limit,stamina_1h=EXCLUDED.stamina_1h,stamina_1h_limit=EXCLUDED.stamina_1h_limit,
+      stamina_1d=EXCLUDED.stamina_1d,stamina_1d_limit=EXCLUDED.stamina_1d_limit,current_join_mode=EXCLUDED.current_join_mode,life=EXCLUDED.life,
+      death_drop_coins=EXCLUDED.death_drop_coins,death_loss_preview=EXCLUDED.death_loss_preview,external_balance_snapshot=EXCLUDED.external_balance_snapshot,
+      quota_day=EXCLUDED.quota_day,initial_quota=EXCLUDED.initial_quota,quota_value=EXCLUDED.quota_value,quota_source=EXCLUDED.quota_source,
+      today_kills=EXCLUDED.today_kills,today_deaths=EXCLUDED.today_deaths,today_income=EXCLUDED.today_income,today_quota_known=EXCLUDED.today_quota_known,updated_at=now()
+    WHERE panel_player_current.current_name IS DISTINCT FROM EXCLUDED.current_name
+      OR panel_player_current.last_seen_at IS DISTINCT FROM EXCLUDED.last_seen_at
+      OR panel_player_current.current_entity_id IS DISTINCT FROM EXCLUDED.current_entity_id
+      OR panel_player_current.online IS DISTINCT FROM EXCLUDED.online
+      OR panel_player_current.server_day IS DISTINCT FROM EXCLUDED.server_day
+      OR panel_player_current.state_snapshot_id IS DISTINCT FROM EXCLUDED.state_snapshot_id
+      OR panel_player_current.state_observed_at IS DISTINCT FROM EXCLUDED.state_observed_at
+      OR panel_player_current.reset_generation IS DISTINCT FROM EXCLUDED.reset_generation
+      OR panel_player_current.x IS DISTINCT FROM EXCLUDED.x OR panel_player_current.y IS DISTINCT FROM EXCLUDED.y
+      OR panel_player_current.hp IS DISTINCT FROM EXCLUDED.hp OR panel_player_current.max_hp IS DISTINCT FROM EXCLUDED.max_hp
+      OR panel_player_current.invulnerable_remaining_secs IS DISTINCT FROM EXCLUDED.invulnerable_remaining_secs
+      OR panel_player_current.stamina_5s IS DISTINCT FROM EXCLUDED.stamina_5s OR panel_player_current.stamina_5s_limit IS DISTINCT FROM EXCLUDED.stamina_5s_limit
+      OR panel_player_current.stamina_1h IS DISTINCT FROM EXCLUDED.stamina_1h OR panel_player_current.stamina_1h_limit IS DISTINCT FROM EXCLUDED.stamina_1h_limit
+      OR panel_player_current.stamina_1d IS DISTINCT FROM EXCLUDED.stamina_1d OR panel_player_current.stamina_1d_limit IS DISTINCT FROM EXCLUDED.stamina_1d_limit
+      OR panel_player_current.current_join_mode IS DISTINCT FROM EXCLUDED.current_join_mode OR panel_player_current.life IS DISTINCT FROM EXCLUDED.life
+      OR panel_player_current.death_drop_coins IS DISTINCT FROM EXCLUDED.death_drop_coins OR panel_player_current.death_loss_preview IS DISTINCT FROM EXCLUDED.death_loss_preview
+      OR panel_player_current.external_balance_snapshot IS DISTINCT FROM EXCLUDED.external_balance_snapshot
+      OR panel_player_current.quota_day IS DISTINCT FROM EXCLUDED.quota_day OR panel_player_current.initial_quota IS DISTINCT FROM EXCLUDED.initial_quota
+      OR panel_player_current.quota_value IS DISTINCT FROM EXCLUDED.quota_value OR panel_player_current.quota_source IS DISTINCT FROM EXCLUDED.quota_source
+      OR panel_player_current.today_kills IS DISTINCT FROM EXCLUDED.today_kills OR panel_player_current.today_deaths IS DISTINCT FROM EXCLUDED.today_deaths
+      OR panel_player_current.today_income IS DISTINCT FROM EXCLUDED.today_income OR panel_player_current.today_quota_known IS DISTINCT FROM EXCLUDED.today_quota_known`, values);
+  }
+
   async upsertMessage(client, message) {
     await client.query(`INSERT INTO panel_message_events (server_day,message_id,tick,kind,text,user_id,target_user_id,user_name,target_name,event_at,first_observed_at,last_observed_at)
       VALUES ($1::date,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -255,6 +363,36 @@ class CompactPostgresPanelStore {
       message.server_day, Number(message.message_id), message.tick, message.kind, message.text, message.user_id, message.target_user_id,
       message.user_name, message.target_name, message.event_at, message.first_observed_at || message.last_observed_at, message.last_observed_at
     ]);
+  }
+
+  async upsertMessagesBatch(client, messages) {
+    if (!messages.length) return;
+    const rows = messages.map(message => ({
+      server_day: message.server_day,
+      message_id: Number(message.message_id),
+      tick: message.tick,
+      kind: message.kind,
+      text: message.text,
+      user_id: message.user_id,
+      target_user_id: message.target_user_id,
+      user_name: message.user_name,
+      target_name: message.target_name,
+      event_at: message.event_at,
+      first_observed_at: message.first_observed_at || message.last_observed_at,
+      last_observed_at: message.last_observed_at
+    }));
+    await client.query(`WITH data AS (
+      SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+        server_day date, message_id bigint, tick bigint, kind text, text text,
+        user_id bigint, target_user_id bigint, user_name text, target_name text,
+        event_at timestamptz, first_observed_at timestamptz, last_observed_at timestamptz)
+    )
+    INSERT INTO panel_message_events (server_day,message_id,tick,kind,text,user_id,target_user_id,user_name,target_name,event_at,first_observed_at,last_observed_at)
+    SELECT server_day,message_id,tick,kind,text,user_id,target_user_id,user_name,target_name,event_at,first_observed_at,last_observed_at FROM data
+    ON CONFLICT (server_day,message_id) DO UPDATE SET
+      user_name=COALESCE(EXCLUDED.user_name,panel_message_events.user_name),
+      target_name=COALESCE(EXCLUDED.target_name,panel_message_events.target_name),
+      last_observed_at=EXCLUDED.last_observed_at`, [JSON.stringify(rows)]);
   }
 
   async upsertKill(client, kill) {
@@ -270,49 +408,151 @@ class CompactPostgresPanelStore {
     ]);
   }
 
+  async upsertKillsBatch(client, kills) {
+    if (!kills.length) return;
+    const rows = kills.map(kill => {
+      const drop = kill.drop || {};
+      const victim = kill.victim_position || {};
+      const killer = kill.killer_position || {};
+      return {
+        local_date: kill.local_date,
+        kill_id: kill.kill_id,
+        message_id: kill.message_id,
+        event_at: kill.event_at,
+        server_day: kill.server_day,
+        tick: kill.tick,
+        killer_user_id: kill.killer_user_id,
+        victim_user_id: kill.victim_user_id,
+        killer_name: kill.killer_name,
+        victim_name: kill.victim_name,
+        confidence: kill.confidence,
+        drop_amount: numberOrNull(drop.amount),
+        drop_confidence: drop.confidence || null,
+        victim_x: numberOrNull(victim.x),
+        victim_y: numberOrNull(victim.y),
+        killer_x: numberOrNull(killer.x),
+        killer_y: numberOrNull(killer.y),
+        victim_stamina_5s: numberOrNull(kill.victim_stamina_5s),
+        victim_stamina_5s_limit: numberOrNull(kill.victim_stamina_5s_limit),
+        parser_version: kill.parser_version
+      };
+    });
+    await client.query(`WITH data AS (
+      SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+        local_date date, kill_id text, message_id bigint, event_at timestamptz,
+        server_day date, tick bigint, killer_user_id bigint, victim_user_id bigint,
+        killer_name text, victim_name text, confidence text, drop_amount numeric,
+        drop_confidence text, victim_x double precision, victim_y double precision,
+        killer_x double precision, killer_y double precision, victim_stamina_5s double precision,
+        victim_stamina_5s_limit double precision, parser_version text)
+    )
+    INSERT INTO panel_kill_events (local_date,kill_id,message_id,event_at,server_day,tick,killer_user_id,victim_user_id,killer_name,victim_name,confidence,drop_amount,drop_confidence,victim_x,victim_y,killer_x,killer_y,victim_stamina_5s,victim_stamina_5s_limit,parser_version)
+    SELECT local_date,kill_id,message_id,event_at,server_day,tick,killer_user_id,victim_user_id,killer_name,victim_name,confidence,drop_amount,drop_confidence,victim_x,victim_y,killer_x,killer_y,victim_stamina_5s,victim_stamina_5s_limit,parser_version FROM data
+    ON CONFLICT (local_date,kill_id) DO UPDATE SET
+      killer_name=COALESCE(EXCLUDED.killer_name,panel_kill_events.killer_name),
+      victim_name=COALESCE(EXCLUDED.victim_name,panel_kill_events.victim_name),
+      drop_amount=COALESCE(EXCLUDED.drop_amount,panel_kill_events.drop_amount),
+      drop_confidence=COALESCE(EXCLUDED.drop_confidence,panel_kill_events.drop_confidence),
+      victim_x=COALESCE(EXCLUDED.victim_x,panel_kill_events.victim_x),
+      victim_y=COALESCE(EXCLUDED.victim_y,panel_kill_events.victim_y),
+      killer_x=COALESCE(EXCLUDED.killer_x,panel_kill_events.killer_x),
+      killer_y=COALESCE(EXCLUDED.killer_y,panel_kill_events.killer_y),
+      victim_stamina_5s=COALESCE(EXCLUDED.victim_stamina_5s,panel_kill_events.victim_stamina_5s),
+      victim_stamina_5s_limit=COALESCE(EXCLUDED.victim_stamina_5s_limit,panel_kill_events.victim_stamina_5s_limit)`, [JSON.stringify(rows)]);
+  }
+
   async persistDailySummary(client, day, sourceSnapshotId) {
     const quotas = [...this.engine.dailyQuota.values()].filter(row => row.local_date === day);
     const stats = [...this.engine.dailyStats.values()].filter(row => row.local_date === day);
+    const quotaByUser = new Map(quotas.map(row => [String(row.user_id), row]));
     const byUser = new Map();
     for (const row of quotas) byUser.set(String(row.user_id), { ...row });
     for (const row of stats) byUser.set(String(row.user_id), { ...(byUser.get(String(row.user_id)) || {}), ...row });
     const ranked = quotas.filter(row => row.closing_quota !== null && row.closing_quota !== undefined).sort((a, b) => Number(b.closing_quota) - Number(a.closing_quota) || Number(a.user_id) - Number(b.user_id));
     const topIds = new Set(ranked.slice(0, CANDIDATE_LIMIT).map(row => String(row.user_id)));
-    for (const [uid, row] of byUser) {
+    const previousTopIds = this.engine.dailyTopCandidates.get(day) || new Set();
+    const topChanged = previousTopIds.size !== topIds.size
+      || [...previousTopIds].some(uid => !topIds.has(uid));
+    const dirtyIds = new Set();
+    for (const key of this.engine.lastChangedDailyUsers || []) {
+      const [changedDay, uid] = String(key).split(':');
+      if (changedDay === day) dirtyIds.add(uid);
+    }
+    if (topChanged) {
+      for (const uid of previousTopIds) dirtyIds.add(uid);
+      for (const uid of topIds) dirtyIds.add(uid);
+    }
+    this.engine.dailyTopCandidates.set(day, topIds);
+    const rows = [];
+    for (const uid of dirtyIds) {
+      const row = byUser.get(uid);
+      if (!row) continue;
       const income = row.income === undefined ? null : row.income;
       const kills = Number(row.kills || 0);
       const deaths = Number(row.deaths || 0);
-      const hasQuota = quotas.some(q => String(q.user_id) === uid);
-      const keep = kills !== 0 || deaths !== 0 || income === null && hasQuota || income !== null && income !== 0 || topIds.has(uid);
+      const q = quotaByUser.get(uid) || {};
+      const hasQuota = Boolean(quotaByUser.get(uid));
+      const keep = kills !== 0 || deaths !== 0 || income === null && hasQuota || income !== null && income !== 0
+        || topIds.has(uid) || previousTopIds.has(uid);
       if (!keep) continue;
-      const q = quotas.find(item => String(item.user_id) === uid) || {};
       const status = !hasQuota ? 'absent' : income === null ? 'unknown' : 'known';
-      await client.query(`INSERT INTO panel_daily_summary (local_date,user_id,kills,deaths,initial_quota,closing_quota,income,quota_status,quota_top_candidate,source_snapshot_id,finalized_at,updated_at)
-        VALUES ($1::date,$2,$3,$4,$5,$6,$7,$8,$9,$10,CASE WHEN $1::date < (now() AT TIME ZONE 'Asia/Shanghai')::date THEN now() ELSE NULL END,now())
-        ON CONFLICT (local_date,user_id) DO UPDATE SET kills=EXCLUDED.kills,deaths=EXCLUDED.deaths,initial_quota=COALESCE(panel_daily_summary.initial_quota,EXCLUDED.initial_quota),closing_quota=EXCLUDED.closing_quota,income=EXCLUDED.income,quota_status=EXCLUDED.quota_status,quota_top_candidate=EXCLUDED.quota_top_candidate,source_snapshot_id=EXCLUDED.source_snapshot_id,finalized_at=COALESCE(panel_daily_summary.finalized_at,EXCLUDED.finalized_at),updated_at=now()`, [
-        day, Number(uid), kills, deaths, q.initial_quota ?? null, q.closing_quota ?? null, income, status, topIds.has(uid), sourceSnapshotId
-      ]);
+      rows.push([day, Number(uid), kills, deaths, q.initial_quota ?? null, q.closing_quota ?? null, income, status, topIds.has(uid), sourceSnapshotId]);
     }
+    if (!rows.length) return;
+    const values = [];
+    const tuples = rows.map(row => {
+      const placeholders = row.map((value, index) => {
+        values.push(value);
+        return index === 0 ? `$${values.length}::date` : `$${values.length}`;
+      });
+      return `(${placeholders.join(',')},CASE WHEN $${values.length - row.length + 1}::date < (now() AT TIME ZONE 'Asia/Shanghai')::date THEN now() ELSE NULL END,now())`;
+    });
+    await client.query(`INSERT INTO panel_daily_summary (local_date,user_id,kills,deaths,initial_quota,closing_quota,income,quota_status,quota_top_candidate,source_snapshot_id,finalized_at,updated_at)
+      VALUES ${tuples.join(',')}
+      ON CONFLICT (local_date,user_id) DO UPDATE SET kills=EXCLUDED.kills,deaths=EXCLUDED.deaths,
+        initial_quota=COALESCE(panel_daily_summary.initial_quota,EXCLUDED.initial_quota),closing_quota=EXCLUDED.closing_quota,
+        income=EXCLUDED.income,quota_status=EXCLUDED.quota_status,quota_top_candidate=EXCLUDED.quota_top_candidate,
+        source_snapshot_id=EXCLUDED.source_snapshot_id,finalized_at=COALESCE(panel_daily_summary.finalized_at,EXCLUDED.finalized_at),updated_at=now()
+      WHERE panel_daily_summary.kills IS DISTINCT FROM EXCLUDED.kills
+        OR panel_daily_summary.deaths IS DISTINCT FROM EXCLUDED.deaths
+        OR panel_daily_summary.initial_quota IS DISTINCT FROM COALESCE(panel_daily_summary.initial_quota,EXCLUDED.initial_quota)
+        OR panel_daily_summary.closing_quota IS DISTINCT FROM EXCLUDED.closing_quota
+        OR panel_daily_summary.income IS DISTINCT FROM EXCLUDED.income
+        OR panel_daily_summary.quota_status IS DISTINCT FROM EXCLUDED.quota_status
+        OR panel_daily_summary.quota_top_candidate IS DISTINCT FROM EXCLUDED.quota_top_candidate
+        OR panel_daily_summary.source_snapshot_id IS DISTINCT FROM EXCLUDED.source_snapshot_id`, values);
   }
 
   async persistResult(client, result) {
     const { parsed, version } = result;
-    for (const entity of parsed.entities) {
-      const state = this.engine.currentStates.get(String(entity.user_id));
-      await this.upsertCurrent(client, entity, parsed, version, state, true);
-    }
+    const dirtyIds = this.engine.lastChangedCurrentUsers || new Set(parsed.entities.map(entity => String(entity.user_id)));
+    const dirtyEntities = parsed.entities.filter(entity => dirtyIds.has(String(entity.user_id)));
+    await this.upsertCurrentBatch(client, dirtyEntities, parsed, version);
     if (parsed.completeness === 'steady') {
-      for (const userId of this.engine.lastClosedUsers || []) await client.query('UPDATE panel_player_current SET online=false, updated_at=now() WHERE user_id=$1', [userId]);
+      const closedUsers = this.engine.lastClosedUsers || [];
+      if (closedUsers.length) await client.query('UPDATE panel_player_current SET online=false, updated_at=now() WHERE user_id = ANY($1::bigint[]) AND online=true', [closedUsers]);
     }
-    for (const message of this.engine.messages.values()) if (message.last_observed_snapshot_id === parsed.snapshotId) await this.upsertMessage(client, message);
-    for (const kill of this.engine.lastTouchedKills || []) await this.upsertKill(client, kill);
+    await this.upsertMessagesBatch(client, this.engine.lastTouchedMessages || []);
+    await this.upsertKillsBatch(client, this.engine.lastTouchedKills || []);
     await this.persistDailySummary(client, parsed.serverDay, parsed.snapshotId);
     const map = loadMapMetadata();
-    if (map) await client.query(`INSERT INTO panel_map_metadata (map_id,version,payload,updated_at) VALUES ($1,$2,$3::jsonb,now()) ON CONFLICT (map_id,version) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now()`, [map.id, map.version, JSON.stringify(map)]);
+    if (map) {
+      const payload = JSON.stringify(map);
+      const fingerprint = `${map.id}:${map.version}:${payload}`;
+      if (fingerprint !== this.persistedMapFingerprint) {
+        await client.query(`INSERT INTO panel_map_metadata (map_id,version,payload,updated_at) VALUES ($1,$2,$3::jsonb,now()) ON CONFLICT (map_id,version) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now()`, [map.id, map.version, payload]);
+        this.persistedMapFingerprint = fingerprint;
+      }
+    }
   }
 
   async applyObservation(body, metadata = {}) {
     const result = this.engine.applyObservation(body, metadata);
+    // Consecutive duplicate bodies are already represented by the newest
+    // accepted version. The queue still records the item as a terminal
+    // duplicate, while the compact store avoids an otherwise empty BEGIN /
+    // COMMIT and a version/day-status write on every 30-second poll.
+    if (result.status === 'duplicate' || result.status === 'invalid') return result;
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');

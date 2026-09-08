@@ -12,6 +12,10 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 
 async function run() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required for projector-worker');
+  // Partial body/metadata moves can only be created during startup recovery.
+  // Keep the repair out of the one-second polling loop; processed/ contains a
+  // metadata file for every historical observation.
+  queue.recoverPartialMoves();
   await store.hydrate();
   while (!stopping) {
     const items = await queue.process(async (body, item) => store.applyObservation(body, {

@@ -30,6 +30,23 @@ const DEFAULT_MAP_METADATA = Object.freeze({
 
 const EXTERNAL_BALANCE_PER_QUOTA = 500_000;
 const ROLLOVER_ZERO_GUARD_MS = 30 * 60 * 1000;
+// These are the fields represented by panel_player_current and exposed by
+// realtime/history views. Other raw entity fields remain useful to the full
+// projector, but changing one of them does not require rewriting the compact
+// current row.
+const COMPACT_CURRENT_FIELDS = [
+  'entity_id', 'name', 'x', 'y', 'hp', 'max_hp', 'invulnerable_remaining_secs',
+  'stamina_5s_remaining_milli', 'stamina_5s_limit_milli',
+  'stamina_1h_remaining_milli', 'stamina_1h_limit_milli',
+  'stamina_1d_remaining_milli', 'stamina_1d_limit_milli',
+  'current_join_mode', 'life', 'death_drop_coins', 'death_loss_preview',
+  'external_balance_snapshot'
+];
+
+function compactCurrentChanged(previous, current) {
+  if (!previous) return true;
+  return COMPACT_CURRENT_FIELDS.some(field => !isDeepStrictEqual(previous[field], current[field]));
+}
 
 function loadMapMetadata(options = {}) {
   const filePath = options.mapMetadataFile || process.env.PANEL_MAP_METADATA_FILE || path.resolve(__dirname, '../../data/map-metadata.json');
@@ -138,6 +155,7 @@ class ProjectionEngine {
     this.observationById = new Map();
     this.versions = [];
     this.versionByKey = new Map();
+    this.versionById = new Map();
     this.players = new Map();
     this.nameHistory = new Map();
     this.entityHistory = new Map();
@@ -149,8 +167,14 @@ class ProjectionEngine {
     this.messages = new Map();
     this.kills = new Map();
     this.drops = new Map();
+    this.dropByMatch = new Map();
+    this.pendingKillIds = new Set();
     this.lastTouchedDrops = [];
     this.lastTouchedKills = [];
+    this.lastTouchedMessages = [];
+    this.lastChangedCurrentUsers = new Set();
+    this.lastChangedDailyUsers = new Set();
+    this.dailyTopCandidates = new Map();
     this.dailyStats = new Map();
     this.quotaCurrent = new Map();
     this.dailyQuota = new Map();
@@ -194,10 +218,50 @@ class ProjectionEngine {
 
   applyObservation(body, metadata = {}) {
     const observedAt = metadata.observedAt || metadata.observed_at || new Date().toISOString();
+    // The collector hashes every successful body before it enters the durable
+    // queue.  When the hash is the same as the newest accepted version, the
+    // payload is a consecutive duplicate and parsing it again cannot change
+    // projection state.  Keep the observation receipt in memory for callers,
+    // but avoid JSON parsing and all downstream projection work.
+    const newest = this.lastVersion;
+    if (metadata.payloadHash && newest?.payload_hash === metadata.payloadHash) {
+      const parsed = {
+        valid: true,
+        complete: newest.completeness === 'steady',
+        completeness: newest.completeness,
+        parseStatus: 'duplicate',
+        schemaVersion: newest.schema_version,
+        payloadHash: newest.payload_hash,
+        serverDay: newest.server_day,
+        resetGeneration: Number(newest.reset_generation),
+        serverTick: Number(newest.server_tick),
+        snapshotId: newest.snapshot_id,
+        snapshotKey: newest.snapshot_key,
+        observedAt: new Date(observedAt).toISOString(),
+        entityCount: newest.entity_count,
+        totalEntities: newest.total_entities,
+        bulletCount: newest.bullet_count,
+        coinDropCount: newest.coin_drop_count,
+        messageCount: newest.message_count,
+        entities: [],
+        messages: [],
+        drops: [],
+        errors: []
+      };
+      const observation = this.recordObservation({ ...metadata, observedAt, body, payloadHash: metadata.payloadHash }, parsed);
+      const existing = this.versionById.get(newest.snapshot_id) || newest;
+      existing.duplicate_poll_count = Number(existing.duplicate_poll_count || 0) + 1;
+      existing.last_observed_at = observation.observed_at;
+      existing.observation_ids = existing.observation_ids || [];
+      existing.observation_ids.push(observation.observation_id);
+      observation.parse_status = 'duplicate';
+      return { observation, parsed, version: existing, status: 'duplicate' };
+    }
     const parseResult = parseSnapshot(body, {
       observedAt,
       previous: this.lastParserCursor,
-      minSteadyEntities: this.options.minSteadyEntities
+      minSteadyEntities: this.options.minSteadyEntities,
+      payloadHash: metadata.payloadHash
     });
     const observation = this.recordObservation({ ...metadata, observedAt, body, payloadHash: metadata.payloadHash }, parseResult);
     observation.parse_status = parseResult.parseStatus;
@@ -243,6 +307,7 @@ class ProjectionEngine {
       errors: parseResult.errors
     };
     this.versionByKey.set(parseResult.snapshotKey, version);
+    this.versionById.set(version.snapshot_id, version);
     this.versions.push(version);
     this.lastVersion = version;
     observation.parse_status = parseResult.completeness === 'steady' ? 'projected' : 'warming_up';
@@ -283,10 +348,13 @@ class ProjectionEngine {
   projectWarmingState(parsed, version) {
     const previousStates = new Map(this.currentStates);
     this.lastWarmingUsers = [];
+    this.lastChangedCurrentUsers = new Set();
+    this.lastChangedDailyUsers = new Set();
     for (const entity of parsed.entities) {
       const uid = userKey(entity.user_id);
       if (!uid) continue;
       const previousState = previousStates.get(uid);
+      if (compactCurrentChanged(previousState, entity)) this.lastChangedCurrentUsers.add(uid);
       const segmentId = previousState?.segment_id || `segment-${parsed.snapshotId}-${uid}`;
       const player = this.players.get(uid) || {
         user_id: entity.user_id,
@@ -324,6 +392,8 @@ class ProjectionEngine {
   projectStableVersion(parsed, version) {
     this.lastClosedUsers = [];
     this.lastTouchedIntervals = [];
+    this.lastChangedCurrentUsers = new Set();
+    this.lastChangedDailyUsers = new Set();
     const entitiesByUser = new Map();
     for (const entity of parsed.entities) entitiesByUser.set(userKey(entity.user_id), entity);
     const previousStates = new Map(this.currentStates);
@@ -354,6 +424,7 @@ class ProjectionEngine {
         if (player) {
           player.online = false;
           this.lastClosedUsers.push(player.user_id);
+          this.lastChangedCurrentUsers.add(uid);
         }
       }
     }
@@ -364,6 +435,10 @@ class ProjectionEngine {
       const continuous = Boolean(previousState && !previousState.from_warming && this.lastStableUsers.has(uid) && !dayChanged && !generationChanged && previousState.entity_id === entity.entity_id && previousState.segment_id);
       const segmentId = continuous ? previousState.segment_id : `segment-${parsed.snapshotId}-${uid}`;
       if (continuous) sameSegment.add(uid);
+      const delta = diffState(previousState, entity);
+      if (!continuous || !previousState || previousState.online === false || compactCurrentChanged(previousState, entity)) {
+        this.lastChangedCurrentUsers.add(uid);
+      }
       const state = { ...entity, snapshot_id: parsed.snapshotId, observed_at: version.observed_at, server_day: parsed.serverDay, reset_generation: parsed.resetGeneration, entity_id: entity.entity_id, segment_id: segmentId, online: true };
       const player = this.players.get(uid) || {
         user_id: entity.user_id,
@@ -428,7 +503,6 @@ class ProjectionEngine {
         this.openIntervals.set(uid, interval);
         this.lastTouchedIntervals.push(interval);
       } else {
-        const delta = diffState(previousState, entity);
         if (delta.changedFields.length > 0) {
           this.stateDeltas.push({
             snapshot_id: parsed.snapshotId,
@@ -466,8 +540,13 @@ class ProjectionEngine {
     if (kill && !this.lastTouchedKills.some(item => item.kill_id === kill.kill_id)) this.lastTouchedKills.push(kill);
   }
 
+  touchMessage(message) {
+    if (message && !this.lastTouchedMessages.some(item => item.message_id === message.message_id)) this.lastTouchedMessages.push(message);
+  }
+
   projectMessages(parsed, version, entitiesByUser, evidenceStates = this.currentStates) {
     this.lastTouchedKills = [];
+    this.lastTouchedMessages = [];
     for (const message of parsed.messages) {
       // Message IDs are globally stable in the observed service buffer. The
       // server day remains stored as evidence, but must not create a second
@@ -484,8 +563,9 @@ class ProjectionEngine {
           // newest steady state, which for a victim means the state *after*
           // they respawned — a strictly worse reading than the one taken at
           // death.
-          this.attachKillEvidence(oldKill, evidenceStates, version);
-          this.touchKill(oldKill);
+          if (this.killEvidenceNeedsWork(oldKill) && this.attachKillEvidence(oldKill, evidenceStates, version)) {
+            this.touchKill(oldKill);
+          }
         }
         continue;
       }
@@ -511,6 +591,7 @@ class ProjectionEngine {
         last_observed_at: version.observed_at
       };
       this.messages.set(messageKey, event);
+      this.touchMessage(event);
       if (String(message.kind).toLowerCase() === 'kill') {
         const kill = {
           kill_id: messageKey,
@@ -535,6 +616,7 @@ class ProjectionEngine {
         this.attachKillEvidence(kill, evidenceStates, version);
         if (!kill.evidence_snapshot_id) kill.evidence_snapshot_id = parsed.snapshotId;
         this.kills.set(messageKey, kill);
+        this.pendingKillIds.add(kill.kill_id);
         this.touchKill(kill);
         this.incrementDailyStat(message.local_date || event.local_date, message.user_id, 'kills');
         this.incrementDailyStat(message.local_date || event.local_date, message.target_user_id, 'deaths');
@@ -553,21 +635,45 @@ class ProjectionEngine {
   // previous world was accepted as "steady" evidence, which is how a kill at
   // tick 3673 was recorded with the 37 coins its victim had been carrying at
   // 23:59 the night before instead of the 465 they actually dropped.
+  killEvidenceNeedsWork(kill) {
+    const victimNeeds = kill.victim_user_id !== null && kill.victim_user_id !== undefined
+      && (!kill.victim_position
+        || kill.victim_stamina_5s === null || kill.victim_stamina_5s_limit === null || kill.drop === null);
+    const killerNeeds = kill.killer_user_id !== null && kill.killer_user_id !== undefined && !kill.killer_position;
+    return victimNeeds || killerNeeds;
+  }
+
   attachKillEvidence(kill, evidenceStates, version) {
+    let changed = false;
     const victim = evidenceStates.get(userKey(kill.victim_user_id));
     const killer = evidenceStates.get(userKey(kill.killer_user_id));
     if (victim && this.precedesKill(victim, kill, version)) {
-      if (!kill.victim_position) kill.victim_position = { x: numeric(victim.x), y: numeric(victim.y) };
-      if (kill.victim_stamina_5s === null) kill.victim_stamina_5s = numeric(victim.stamina_5s_remaining_milli);
-      if (kill.victim_stamina_5s_limit === null) kill.victim_stamina_5s_limit = numeric(victim.stamina_5s_limit_milli);
-      if (!kill.evidence_snapshot_id) kill.evidence_snapshot_id = victim.snapshot_id || null;
+      if (!kill.victim_position) {
+        kill.victim_position = { x: numeric(victim.x), y: numeric(victim.y) };
+        changed = true;
+      }
+      if (kill.victim_stamina_5s === null) {
+        kill.victim_stamina_5s = numeric(victim.stamina_5s_remaining_milli);
+        changed = true;
+      }
+      if (kill.victim_stamina_5s_limit === null) {
+        kill.victim_stamina_5s_limit = numeric(victim.stamina_5s_limit_milli);
+        changed = true;
+      }
+      if (!kill.evidence_snapshot_id && victim.snapshot_id) {
+        kill.evidence_snapshot_id = victim.snapshot_id;
+        changed = true;
+      }
       if (kill.drop === null && Object.prototype.hasOwnProperty.call(victim, 'death_drop_coins')) {
         kill.drop = { amount: numeric(victim.death_drop_coins), confidence: 'confirmed', evidence_snapshot_id: victim.snapshot_id || null };
+        changed = true;
       }
     }
     if (killer && !kill.killer_position && this.precedesKill(killer, kill, version)) {
       kill.killer_position = { x: numeric(killer.x), y: numeric(killer.y) };
+      changed = true;
     }
+    return changed;
   }
 
   // Ticks restart with the world, so only ticks from the same world generation
@@ -579,7 +685,7 @@ class ProjectionEngine {
   precedesKill(state, kill, version) {
     if (!state || !state.snapshot_id || !version) return false;
     if (state.reset_generation !== version.reset_generation) return false;
-    const stateVersion = this.versions.find(item => item.snapshot_id === state.snapshot_id);
+    const stateVersion = this.versionById.get(state.snapshot_id);
     if (!stateVersion || !Number.isFinite(stateVersion.server_tick) || !Number.isFinite(kill.tick)) return false;
     return stateVersion.server_tick <= kill.tick;
   }
@@ -591,6 +697,7 @@ class ProjectionEngine {
     const stats = this.dailyStats.get(key) || { local_date: localDate, user_id: id, kills: 0, deaths: 0 };
     stats[field] += 1;
     this.dailyStats.set(key, stats);
+    this.lastChangedDailyUsers.add(key);
   }
 
   projectDrops(parsed, version, allowDisappearance = true) {
@@ -599,14 +706,15 @@ class ProjectionEngine {
     for (const drop of parsed.drops) {
       const key = mapKey(parsed.serverDay, drop.drop_id);
       presentKeys.add(key);
-      touchedKeys.add(key);
       const old = this.drops.get(key);
       if (old) {
+        const wasDisappeared = Boolean(old.disappeared_at);
         old.last_seen_snapshot_id = parsed.snapshotId;
         old.last_seen_at = version.observed_at;
         old.disappeared_at = null;
+        if (wasDisappeared) touchedKeys.add(key);
       } else {
-        this.drops.set(key, {
+        const created = {
           drop_id: drop.drop_id,
           server_day: parsed.serverDay,
           first_seen_snapshot_id: parsed.snapshotId,
@@ -623,7 +731,13 @@ class ProjectionEngine {
           source: drop.system_spawned ? 'system' : 'player',
           confidence: drop.system_spawned ? 'confirmed' : 'inferred',
           kill_event_id: null
-        });
+        };
+        this.drops.set(key, created);
+        const matchKey = mapKey(created.server_day, created.created_tick, created.source_user_id);
+        const matches = this.dropByMatch.get(matchKey) || [];
+        matches.push(created);
+        this.dropByMatch.set(matchKey, matches);
+        touchedKeys.add(key);
       }
     }
     for (const drop of this.drops.values()) {
@@ -633,15 +747,28 @@ class ProjectionEngine {
         touchedKeys.add(mapKey(parsed.serverDay, drop.drop_id));
       }
     }
-    for (const kill of this.kills.values()) {
-      if (kill.coin_drop?.confidence === 'confirmed' || kill.server_day !== parsed.serverDay) continue;
+    for (const killId of this.pendingKillIds) {
+      const kill = this.kills.get(killId);
+      if (!kill) {
+        this.pendingKillIds.delete(killId);
+        continue;
+      }
+      if (kill.coin_drop?.confidence === 'confirmed') {
+        this.pendingKillIds.delete(killId);
+        continue;
+      }
+      if (kill.server_day !== parsed.serverDay) {
+        this.pendingKillIds.delete(killId);
+        continue;
+      }
       // The coins on the ground came out of the victim's pocket, so the drop
       // object carries the victim's user id. Matching on the killer linked
       // nothing at all — on 2026-08-26 that was 0 of 56 player drops — and it
       // also threw away the one piece of evidence that survives when the victim
       // is missing from the snapshots around their own death.
       const victimKey = userKey(kill.victim_user_id);
-      const candidate = victimKey === null ? null : Array.from(this.drops.values()).find(drop => drop.server_day === parsed.serverDay && !drop.system_spawned && drop.created_tick === kill.tick && userKey(drop.source_user_id) === victimKey);
+      const candidates = victimKey === null ? [] : (this.dropByMatch.get(mapKey(parsed.serverDay, kill.tick, victimKey)) || []);
+      const candidate = candidates.find(drop => !drop.system_spawned && !drop.disappeared_at) || null;
       if (candidate) {
         kill.coin_drop = { drop_id: candidate.drop_id, amount: candidate.amount, x: candidate.x, y: candidate.y, confidence: 'confirmed' };
         candidate.kill_event_id = kill.kill_id;
@@ -653,6 +780,7 @@ class ProjectionEngine {
           kill.drop = { amount: numeric(candidate.amount), confidence: 'confirmed', evidence_snapshot_id: candidate.first_seen_snapshot_id || null, drop_id: candidate.drop_id };
         }
         this.touchKill(kill);
+        this.pendingKillIds.delete(kill.kill_id);
         touchedKeys.add(mapKey(candidate.server_day, candidate.drop_id));
       } else {
         kill.coin_drop = { drop_id: null, amount: null, x: null, y: null, confidence: 'unknown' };
@@ -702,6 +830,8 @@ class ProjectionEngine {
       const quotaValue = externalBalance === null ? null : externalBalance / EXTERNAL_BALANCE_PER_QUOTA;
       const resetBaseline = !existingQuota || existingQuota.quota_day !== parsed.serverDay || existingQuota.quota_source !== 'external_balance_snapshot';
       let quota = existingQuota;
+      const previousQuotaValue = existingQuota?.quota_value ?? null;
+      const previousQuotaDay = existingQuota?.quota_day ?? null;
       if (resetBaseline) {
         quota = {
           user_id: entity.user_id,
@@ -740,6 +870,10 @@ class ProjectionEngine {
       daily.income = daily.initial_quota !== null && daily.closing_quota !== null ? daily.closing_quota - daily.initial_quota : null;
       daily.source_snapshot_id = parsed.snapshotId;
       this.dailyQuota.set(dailyKey, daily);
+      if (resetBaseline || previousQuotaDay !== quota.quota_day || previousQuotaValue !== quota.quota_value) {
+        this.lastChangedCurrentUsers.add(uid);
+        this.lastChangedDailyUsers.add(dailyKey);
+      }
     }
   }
 

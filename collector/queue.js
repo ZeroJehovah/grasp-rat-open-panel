@@ -91,39 +91,43 @@ class DurableObservationQueue {
   }
 
   recoverPartialMoves() {
-    const directories = [this.pending, this.processed, this.failed];
-    const metadataByName = new Map();
-    const bodyByName = new Map();
-    for (const directory of directories) {
+    // A normal queue cycle only creates partial moves in pending/failed. The
+    // body is renamed before its metadata, so a terminal body with an active
+    // metadata file (or the inverse) is enough to find the interrupted move.
+    // Do not enumerate processed here: it contains one metadata file per
+    // observation and is intentionally outside the projector hot path.
+    const activeDirectories = [this.pending, this.failed];
+    const terminalDirectories = [this.pending, this.processed, this.failed];
+    for (const directory of activeDirectories) {
       for (const file of fs.readdirSync(directory)) {
-        if (file.endsWith('.json')) {
-          const metadataPath = path.join(directory, file);
-          if (readJson(metadataPath)) metadataByName.set(file, [...(metadataByName.get(file) || []), metadataPath]);
-        } else if (file.endsWith('.body')) {
-          const bodyPath = path.join(directory, file);
-          bodyByName.set(file, [...(bodyByName.get(file) || []), bodyPath]);
-        }
+        if (!file.endsWith('.json')) continue;
+        const metadataPath = path.join(directory, file);
+        if (!readJson(metadataPath)) continue;
+        const bodyName = file.replace(/\.json$/, '.body');
+        if (fs.existsSync(path.join(directory, bodyName))) continue;
+        const bodyPath = terminalDirectories
+          .filter(target => target !== directory)
+          .map(target => path.join(target, bodyName))
+          .find(candidate => fs.existsSync(candidate));
+        if (!bodyPath) continue;
+        const targetDirectory = path.dirname(bodyPath);
+        durableRename(metadataPath, path.join(targetDirectory, file));
       }
-    }
-    for (const [metadataName, metadataPaths] of metadataByName) {
-      if (metadataPaths.length !== 1) continue;
-      const metadataPath = metadataPaths[0];
-      const bodyName = metadataName.replace(/\.json$/, '.body');
-      const bodyPaths = bodyByName.get(bodyName) || [];
-      if (bodyPaths.length !== 1) continue;
-      const bodyPath = bodyPaths[0];
-      const metadataDirectory = path.dirname(metadataPath);
-      const bodyDirectory = path.dirname(bodyPath);
-      // The body is renamed first during processing. If it already reached a
-      // terminal directory, follow it and complete the metadata move. The
-      // inverse handles a crash after the metadata move. Pending/pending is a
-      // complete pair and needs no action.
-      const targetDirectory = bodyDirectory !== this.pending ? bodyDirectory
-        : metadataDirectory !== this.pending ? this.pending
-          : null;
-      if (!targetDirectory) continue;
-      if (bodyDirectory !== targetDirectory) durableRename(bodyPath, path.join(targetDirectory, bodyName));
-      if (metadataDirectory !== targetDirectory) durableRename(metadataPath, path.join(targetDirectory, metadataName));
+      for (const file of fs.readdirSync(directory)) {
+        if (!file.endsWith('.body')) continue;
+        const bodyPath = path.join(directory, file);
+        const metadataName = file.replace(/\.body$/, '.json');
+        if (fs.existsSync(path.join(directory, metadataName))) continue;
+        const metadataPath = terminalDirectories
+          .filter(target => target !== directory)
+          .map(target => path.join(target, metadataName))
+          .find(candidate => fs.existsSync(candidate));
+        if (!metadataPath) continue;
+        // The body is the active half in this branch. Bring the metadata to
+        // the same directory so pending/failed pairs become visible to the
+        // normal queue state machine again.
+        durableRename(metadataPath, path.join(directory, metadataName));
+      }
     }
   }
 
@@ -193,7 +197,6 @@ class DurableObservationQueue {
     const maxItems = Number(options.maxItems || Infinity);
     const retryBaseMs = Number(options.retryBaseMs || 30_000);
     const maxAttempts = Number(options.maxAttempts || 5);
-    this.recoverPartialMoves();
     this.recoverFailed(now);
     this.cleanupProcessedBodies();
     const processed = [];
