@@ -641,9 +641,11 @@ class CompactPostgresPanelStore {
           FROM panel_player_current pc
         ), quota_top AS (SELECT user_id FROM ranked WHERE balance_rank IS NOT NULL ORDER BY balance_rank DESC,user_id LIMIT 50),
         drop_top AS (SELECT user_id FROM ranked WHERE server_day=$1::date AND death_drop_coins IS NOT NULL ORDER BY death_drop_coins DESC,user_id LIMIT 50),
-        income_top AS (SELECT user_id FROM ranked WHERE today_income IS NOT NULL ORDER BY today_income DESC,user_id LIMIT 50),
+        income_top AS (SELECT user_id FROM ranked WHERE server_day=$1::date AND today_income IS NOT NULL ORDER BY today_income DESC,user_id LIMIT 50),
         candidates AS (SELECT user_id FROM quota_top UNION SELECT user_id FROM drop_top UNION SELECT user_id FROM income_top)
-        SELECT ${currentColumns('r').replace(/r\.today_kills AS kills, r\.today_deaths AS deaths/, 'r.live_kills AS kills, r.live_deaths AS deaths')}
+        SELECT ${currentColumns('r')
+          .replace(/r\.today_kills AS kills, r\.today_deaths AS deaths/, 'r.live_kills AS kills, r.live_deaths AS deaths')
+          .replace('r.today_income AS income', 'CASE WHEN r.server_day=$1::date THEN r.today_income ELSE NULL END AS income')}
         FROM ranked r INNER JOIN candidates c USING (user_id) ORDER BY r.user_id LIMIT 5001`, [day]);
       return { ...common, players: result.rows.map(row => rowToPlayer(row, { kills: row.kills, deaths: row.deaths }, { currentDay: day, lastKnownBalance: true })) };
     }
