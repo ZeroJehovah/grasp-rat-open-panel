@@ -634,19 +634,27 @@ class CompactPostgresPanelStore {
       return { ...common, map: map.rows[0]?.payload || this.engine.mapMetadata, players: players.rows.map(row => rowToPlayer(row, { kills: row.kills, deaths: row.deaths }, { currentDay: day })).map(player => ({ userId: player.userId, name: player.name, online: player.online, drop: player.drop, state: player.state ? { hp: player.state.hp, maxHp: player.state.maxHp, x: player.state.x, y: player.state.y, invulnerableRemainingSecs: player.state.invulnerableRemainingSecs, loss: player.state.loss, stamina5s: player.state.stamina5s, stamina1h: player.state.stamina1h, stamina1d: player.state.stamina1d, stamina5sLimit: player.state.stamina5sLimit, stamina1hLimit: player.state.stamina1hLimit, stamina1dLimit: player.state.stamina1dLimit } : null })) };
     }
     if (resource === 'players') {
-      const result = await this.query(`WITH ranked AS (
-          SELECT pc.*, NULLIF(pc.external_balance_snapshot, 0) AS balance_rank,
-            (SELECT count(*) FROM panel_kill_events ke WHERE ke.local_date=$1::date AND ke.killer_user_id=pc.user_id) AS live_kills,
-            (SELECT COALESCE(sum(1),0) FROM panel_kill_events ke WHERE ke.local_date=$1::date AND ke.victim_user_id=pc.user_id) AS live_deaths
-          FROM panel_player_current pc
-        ), quota_top AS (SELECT user_id FROM ranked WHERE balance_rank IS NOT NULL ORDER BY balance_rank DESC,user_id LIMIT 50),
-        drop_top AS (SELECT user_id FROM ranked WHERE server_day=$1::date AND death_drop_coins IS NOT NULL ORDER BY death_drop_coins DESC,user_id LIMIT 50),
-        income_top AS (SELECT user_id FROM ranked WHERE server_day=$1::date AND today_income IS NOT NULL ORDER BY today_income DESC,user_id LIMIT 50),
+      // 候选集合各自只读 panel_player_current 的少数几列，再按主键回表取这 ≤150 行的完整状态。
+      // 这里不能沿用在 CTE 里 join 出完整宽行再反复扫描的写法：panel_player_current 是一行
+      // 一个用户（含历史日期玩家），按行做“今天击杀/死亡”的 correlated subquery 会让成本
+      // 随全表行数线性增长（实测 32k 行约 6–17 秒），宽行 CTE 还会超出 work_mem 落盘。
+      const result = await this.query(`WITH kill_counts AS (
+          SELECT user_id, SUM(kills) AS live_kills, SUM(deaths) AS live_deaths FROM (
+            SELECT killer_user_id AS user_id, 1 AS kills, 0 AS deaths FROM panel_kill_events WHERE local_date=$1::date
+            UNION ALL
+            SELECT victim_user_id AS user_id, 0 AS kills, 1 AS deaths FROM panel_kill_events WHERE local_date=$1::date
+          ) counted GROUP BY user_id
+        ), base AS (
+          SELECT user_id, server_day, death_drop_coins, today_income, external_balance_snapshot FROM panel_player_current
+        ), quota_top AS (SELECT user_id FROM base WHERE external_balance_snapshot IS NOT NULL AND external_balance_snapshot <> 0 ORDER BY external_balance_snapshot DESC,user_id LIMIT ${CANDIDATE_LIMIT}),
+        drop_top AS (SELECT user_id FROM base WHERE server_day=$1::date AND death_drop_coins IS NOT NULL ORDER BY death_drop_coins DESC,user_id LIMIT ${CANDIDATE_LIMIT}),
+        income_top AS (SELECT user_id FROM base WHERE server_day=$1::date AND today_income IS NOT NULL ORDER BY today_income DESC,user_id LIMIT ${CANDIDATE_LIMIT}),
         candidates AS (SELECT user_id FROM quota_top UNION SELECT user_id FROM drop_top UNION SELECT user_id FROM income_top)
         SELECT ${currentColumns('r')
-          .replace(/r\.today_kills AS kills, r\.today_deaths AS deaths/, 'r.live_kills AS kills, r.live_deaths AS deaths')
+          .replace(/r\.today_kills AS kills, r\.today_deaths AS deaths/, 'COALESCE(kc.live_kills, 0) AS kills, COALESCE(kc.live_deaths, 0) AS deaths')
           .replace('r.today_income AS income', 'CASE WHEN r.server_day=$1::date THEN r.today_income ELSE NULL END AS income')}
-        FROM ranked r INNER JOIN candidates c USING (user_id) ORDER BY r.user_id LIMIT 5001`, [day]);
+        FROM panel_player_current r INNER JOIN candidates c USING (user_id)
+          LEFT JOIN kill_counts kc ON kc.user_id = r.user_id ORDER BY r.user_id LIMIT 5001`, [day]);
       return { ...common, players: result.rows.map(row => rowToPlayer(row, { kills: row.kills, deaths: row.deaths }, { currentDay: day, lastKnownBalance: true })) };
     }
     throw new Error(`unknown realtime resource: ${resource}`);
