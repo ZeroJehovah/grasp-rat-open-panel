@@ -42,6 +42,19 @@ function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-rat-ret
   assert.strictEqual(fs.existsSync(path.join(rawDir, recentFiles[0])), false);
   for (const file of recentFiles.slice(1)) assert.ok(fs.existsSync(path.join(rawDir, file)), 'the timer must preserve the latest 20 even after 24 hours');
 
+  const receiptRoot = tempDir();
+  const receiptRawDir = path.join(receiptRoot, 'raw');
+  const receiptQueueDir = path.join(receiptRoot, 'queue');
+  const receiptQueue = new DurableObservationQueue(receiptQueueDir);
+  const receiptNow = new Date('2026-10-19T00:00:00Z');
+  receiptQueue.enqueue({ observationId: 'receipt-old', observedAt: '2026-10-10T00:00:00.000Z', parseStatus: 'pending' }, Buffer.from('old-body'));
+  receiptQueue.enqueue({ observationId: 'receipt-new', observedAt: '2026-10-17T00:00:00.000Z', parseStatus: 'pending' }, Buffer.from('new-body'));
+  await receiptQueue.process(async () => ({ status: 'projected' }));
+  const receipts = runRetention({ rawDir: receiptRawDir, queueDir: receiptQueueDir, rawHours: 24, metadataDays: 62, processedReceiptDays: 7, now: receiptNow, dryRun: false });
+  assert.strictEqual(receipts.processedMetadataDeleted, 1);
+  assert.strictEqual(fs.existsSync(path.join(receiptQueueDir, 'processed', 'receipt-old.json')), false);
+  assert.ok(fs.existsSync(path.join(receiptQueueDir, 'processed', 'receipt-new.json')), 'recent processed receipts must remain available for queue recovery');
+
   const gatedRoot = tempDir();
   const gatedRawDir = path.join(gatedRoot, 'raw');
   const gatedQueueDir = path.join(gatedRoot, 'queue');

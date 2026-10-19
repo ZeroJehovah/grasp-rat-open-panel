@@ -12,6 +12,7 @@ function parseArgs(argv) {
     queueDir: process.env.GRASP_RAT_PANEL_QUEUE_DIR || path.resolve(__dirname, '../../data/spool'),
     rawHours: Number(process.env.GRASP_RAT_PANEL_RAW_RETENTION_HOURS || 24),
     metadataDays: Number(process.env.GRASP_RAT_PANEL_METADATA_RETENTION_DAYS || 62),
+    processedReceiptDays: Number(process.env.GRASP_RAT_PANEL_PROCESSED_RECEIPT_DAYS || 7),
     now: new Date(),
     dryRun: false
   };
@@ -22,6 +23,7 @@ function parseArgs(argv) {
     else if (arg === '--queue-dir') options.queueDir = path.resolve(value());
     else if (arg === '--raw-hours') options.rawHours = Number(value());
     else if (arg === '--metadata-days') options.metadataDays = Number(value());
+    else if (arg === '--processed-receipt-days') options.processedReceiptDays = Number(value());
     else if (arg === '--now') options.now = new Date(value());
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
@@ -29,6 +31,7 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(options.rawHours) || options.rawHours <= 0) throw new Error('raw retention must be positive');
   if (!Number.isFinite(options.metadataDays) || options.metadataDays < 62) throw new Error('metadata retention cannot be less than 62 days');
+  if (!Number.isFinite(options.processedReceiptDays) || options.processedReceiptDays < 2) throw new Error('processed receipt retention cannot be less than 2 days');
   if (Number.isNaN(options.now.getTime())) throw new Error('invalid --now');
   return options;
 }
@@ -58,6 +61,12 @@ function runRetention(options) {
   }
   const rawCutoff = options.now.getTime() - options.rawHours * 60 * 60 * 1000;
   const metadataCutoff = options.now.getTime() - options.metadataDays * 24 * 60 * 60 * 1000;
+  // Processed receipts are commit markers for queue/raw cleanup, not the
+  // 62-day observation history. The latest-20 raw window is measured in
+  // minutes, so a short overlap keeps restart recovery safe without keeping
+  // one filesystem inode per observation for two months.
+  const processedReceiptDays = options.processedReceiptDays === undefined ? 7 : Number(options.processedReceiptDays);
+  const processedCutoff = options.now.getTime() - processedReceiptDays * 24 * 60 * 60 * 1000;
   const rawDeletionAllowed = options.allowRawDeletion !== false;
   let eligible = 0;
   let deleted = 0;
@@ -101,7 +110,7 @@ function runRetention(options) {
         const bodyPath = path.join(processedDir, file.replace(/\.json$/, '.body'));
         try { if (!options.dryRun) fs.unlinkSync(bodyPath); processedBodiesDeleted += 1; } catch (error) { if (error.code !== 'ENOENT') errors.push({ file: path.basename(bodyPath), error: error.message }); }
       }
-      if (Number.isFinite(observedAt) && observedAt < metadataCutoff) {
+      if (Number.isFinite(observedAt) && observedAt < processedCutoff) {
         try { if (!options.dryRun) fs.unlinkSync(metadataPath); processedMetadataDeleted += 1; } catch (error) { if (error.code !== 'ENOENT') errors.push({ file, error: error.message }); }
       }
     }
@@ -117,7 +126,7 @@ function runRetention(options) {
     }
     fs.renameSync(temp, manifestPath);
   }
-  return { rawCutoff: new Date(rawCutoff).toISOString(), metadataCutoff: new Date(metadataCutoff).toISOString(), eligible, deleted, skippedNotCommitted, processedBodiesDeleted, processedMetadataDeleted, metadataRemaining: metadataRecords.length, errors, dryRun: options.dryRun, rawDeletionAllowed };
+  return { rawCutoff: new Date(rawCutoff).toISOString(), metadataCutoff: new Date(metadataCutoff).toISOString(), processedCutoff: new Date(processedCutoff).toISOString(), processedReceiptDays, eligible, deleted, skippedNotCommitted, processedBodiesDeleted, processedMetadataDeleted, metadataRemaining: metadataRecords.length, errors, dryRun: options.dryRun, rawDeletionAllowed };
 }
 
 function businessDate(timestamp) {
@@ -188,7 +197,7 @@ if (require.main === module) {
   (async () => {
    try {
     const options = parseArgs(process.argv.slice(2));
-    if (options.help) console.log('Usage: node commands/retention.js [--raw-dir DIR] [--raw-hours 24] [--metadata-days 62] [--dry-run]');
+    if (options.help) console.log('Usage: node commands/retention.js [--raw-dir DIR] [--raw-hours 24] [--metadata-days 62] [--processed-receipt-days 7] [--dry-run]');
     else {
       const database = await runDatabaseRetention(options);
       const raw = runRetention({ ...options, allowRawDeletion: Boolean(process.env.DATABASE_URL) && (!database.skipped || options.dryRun) });
