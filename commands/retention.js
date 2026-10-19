@@ -12,7 +12,7 @@ function parseArgs(argv) {
     queueDir: process.env.GRASP_RAT_PANEL_QUEUE_DIR || path.resolve(__dirname, '../../data/spool'),
     rawHours: Number(process.env.GRASP_RAT_PANEL_RAW_RETENTION_HOURS || 24),
     metadataDays: Number(process.env.GRASP_RAT_PANEL_METADATA_RETENTION_DAYS || 62),
-    processedReceiptDays: Number(process.env.GRASP_RAT_PANEL_PROCESSED_RECEIPT_DAYS || 7),
+    processedReceiptHours: Number(process.env.GRASP_RAT_PANEL_PROCESSED_RECEIPT_HOURS || 1),
     now: new Date(),
     dryRun: false
   };
@@ -23,7 +23,7 @@ function parseArgs(argv) {
     else if (arg === '--queue-dir') options.queueDir = path.resolve(value());
     else if (arg === '--raw-hours') options.rawHours = Number(value());
     else if (arg === '--metadata-days') options.metadataDays = Number(value());
-    else if (arg === '--processed-receipt-days') options.processedReceiptDays = Number(value());
+    else if (arg === '--processed-receipt-hours') options.processedReceiptHours = Number(value());
     else if (arg === '--now') options.now = new Date(value());
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
@@ -31,7 +31,7 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(options.rawHours) || options.rawHours <= 0) throw new Error('raw retention must be positive');
   if (!Number.isFinite(options.metadataDays) || options.metadataDays < 62) throw new Error('metadata retention cannot be less than 62 days');
-  if (!Number.isFinite(options.processedReceiptDays) || options.processedReceiptDays < 2) throw new Error('processed receipt retention cannot be less than 2 days');
+  if (!Number.isFinite(options.processedReceiptHours) || options.processedReceiptHours < 1) throw new Error('processed receipt retention cannot be less than 1 hour');
   if (Number.isNaN(options.now.getTime())) throw new Error('invalid --now');
   return options;
 }
@@ -65,8 +65,8 @@ function runRetention(options) {
   // 62-day observation history. The latest-20 raw window is measured in
   // minutes, so a short overlap keeps restart recovery safe without keeping
   // one filesystem inode per observation for two months.
-  const processedReceiptDays = options.processedReceiptDays === undefined ? 7 : Number(options.processedReceiptDays);
-  const processedCutoff = options.now.getTime() - processedReceiptDays * 24 * 60 * 60 * 1000;
+  const processedReceiptHours = options.processedReceiptHours === undefined ? 1 : Number(options.processedReceiptHours);
+  const processedCutoff = options.now.getTime() - processedReceiptHours * 60 * 60 * 1000;
   const rawDeletionAllowed = options.allowRawDeletion !== false;
   let eligible = 0;
   let deleted = 0;
@@ -106,11 +106,25 @@ function runRetention(options) {
       try { item = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch (_) { continue; }
       const observedAt = Date.parse(item.observedAt || item.observed_at || observedAtByObservationId.get(item.observationId) || '');
       const committed = ['projected', 'warming_up', 'invalid', 'duplicate'].includes(item.parseStatus || item.status);
-      if (committed && Number.isFinite(observedAt) && observedAt < rawCutoff) {
-        const bodyPath = path.join(processedDir, file.replace(/\.json$/, '.body'));
-        try { if (!options.dryRun) fs.unlinkSync(bodyPath); processedBodiesDeleted += 1; } catch (error) { if (error.code !== 'ENOENT') errors.push({ file: path.basename(bodyPath), error: error.message }); }
+      const expiring = Number.isFinite(observedAt) && observedAt < processedCutoff;
+      const bodyPath = path.join(processedDir, file.replace(/\.json$/, '.body'));
+      let bodyGone = !fs.existsSync(bodyPath);
+      if (committed && (expiring || (Number.isFinite(observedAt) && observedAt < rawCutoff))) {
+        try {
+          if (fs.existsSync(bodyPath)) {
+            if (!options.dryRun) fs.unlinkSync(bodyPath);
+            processedBodiesDeleted += 1;
+          }
+          bodyGone = true;
+        } catch (error) {
+          if (error.code === 'ENOENT') bodyGone = true;
+          else errors.push({ file: path.basename(bodyPath), error: error.message });
+        }
       }
-      if (Number.isFinite(observedAt) && observedAt < processedCutoff) {
+      if (expiring) {
+        // Metadata is the commit marker. Keep it if a matching body could not
+        // be removed, otherwise the body would become an unreclaimable orphan.
+        if (!bodyGone) continue;
         try { if (!options.dryRun) fs.unlinkSync(metadataPath); processedMetadataDeleted += 1; } catch (error) { if (error.code !== 'ENOENT') errors.push({ file, error: error.message }); }
       }
     }
@@ -126,7 +140,7 @@ function runRetention(options) {
     }
     fs.renameSync(temp, manifestPath);
   }
-  return { rawCutoff: new Date(rawCutoff).toISOString(), metadataCutoff: new Date(metadataCutoff).toISOString(), processedCutoff: new Date(processedCutoff).toISOString(), processedReceiptDays, eligible, deleted, skippedNotCommitted, processedBodiesDeleted, processedMetadataDeleted, metadataRemaining: metadataRecords.length, errors, dryRun: options.dryRun, rawDeletionAllowed };
+  return { rawCutoff: new Date(rawCutoff).toISOString(), metadataCutoff: new Date(metadataCutoff).toISOString(), processedCutoff: new Date(processedCutoff).toISOString(), processedReceiptHours, eligible, deleted, skippedNotCommitted, processedBodiesDeleted, processedMetadataDeleted, metadataRemaining: metadataRecords.length, errors, dryRun: options.dryRun, rawDeletionAllowed };
 }
 
 function businessDate(timestamp) {
@@ -197,7 +211,7 @@ if (require.main === module) {
   (async () => {
    try {
     const options = parseArgs(process.argv.slice(2));
-    if (options.help) console.log('Usage: node commands/retention.js [--raw-dir DIR] [--raw-hours 24] [--metadata-days 62] [--processed-receipt-days 7] [--dry-run]');
+    if (options.help) console.log('Usage: node commands/retention.js [--raw-dir DIR] [--raw-hours 24] [--metadata-days 62] [--processed-receipt-hours 1] [--dry-run]');
     else {
       const database = await runDatabaseRetention(options);
       const raw = runRetention({ ...options, allowRawDeletion: Boolean(process.env.DATABASE_URL) && (!database.skipped || options.dryRun) });

@@ -1,9 +1,10 @@
 [Unit]
-Description=Run Grasp Rat Open Panel retention daily
+Description=Run Grasp Rat Open Panel retention hourly
 
 [Timer]
 OnBootSec=15min
-OnCalendar=*-*-* 00:20:00 Asia/Shanghai
+OnCalendar=*-*-* *:20:00 Asia/Shanghai
+RandomizedDelaySec=120
 Persistent=true
 Unit=grasp-rat-panel-retention.service
 

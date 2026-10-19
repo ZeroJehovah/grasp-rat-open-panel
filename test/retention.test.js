@@ -50,10 +50,24 @@ function tempDir() { return fs.mkdtempSync(path.join(os.tmpdir(), 'grasp-rat-ret
   receiptQueue.enqueue({ observationId: 'receipt-old', observedAt: '2026-10-10T00:00:00.000Z', parseStatus: 'pending' }, Buffer.from('old-body'));
   receiptQueue.enqueue({ observationId: 'receipt-new', observedAt: '2026-10-17T00:00:00.000Z', parseStatus: 'pending' }, Buffer.from('new-body'));
   await receiptQueue.process(async () => ({ status: 'projected' }));
-  const receipts = runRetention({ rawDir: receiptRawDir, queueDir: receiptQueueDir, rawHours: 24, metadataDays: 62, processedReceiptDays: 7, now: receiptNow, dryRun: false });
+  const receipts = runRetention({ rawDir: receiptRawDir, queueDir: receiptQueueDir, rawHours: 24, metadataDays: 62, processedReceiptHours: 168, now: receiptNow, dryRun: false });
   assert.strictEqual(receipts.processedMetadataDeleted, 1);
   assert.strictEqual(fs.existsSync(path.join(receiptQueueDir, 'processed', 'receipt-old.json')), false);
   assert.ok(fs.existsSync(path.join(receiptQueueDir, 'processed', 'receipt-new.json')), 'recent processed receipts must remain available for queue recovery');
+
+  const hourlyRoot = tempDir();
+  const hourlyRawDir = path.join(hourlyRoot, 'raw');
+  const hourlyQueueDir = path.join(hourlyRoot, 'queue');
+  const hourlyQueue = new DurableObservationQueue(hourlyQueueDir);
+  hourlyQueue.enqueue({ observationId: 'hourly-old', observedAt: '2026-10-19T10:00:00.000Z', parseStatus: 'pending' }, Buffer.from('old-body'));
+  hourlyQueue.enqueue({ observationId: 'hourly-new', observedAt: '2026-10-19T11:30:00.000Z', parseStatus: 'pending' }, Buffer.from('new-body'));
+  await hourlyQueue.process(async () => ({ status: 'projected' }));
+  fs.writeFileSync(path.join(hourlyQueueDir, 'processed', 'hourly-old.body'), 'stale-body');
+  const hourly = runRetention({ rawDir: hourlyRawDir, queueDir: hourlyQueueDir, rawHours: 24, metadataDays: 62, processedReceiptHours: 1, now: new Date('2026-10-19T12:00:00.000Z'), dryRun: false });
+  assert.strictEqual(hourly.processedMetadataDeleted, 1);
+  assert.strictEqual(fs.existsSync(path.join(hourlyQueueDir, 'processed', 'hourly-old.json')), false);
+  assert.strictEqual(fs.existsSync(path.join(hourlyQueueDir, 'processed', 'hourly-old.body')), false, 'expired metadata must not orphan its body');
+  assert.ok(fs.existsSync(path.join(hourlyQueueDir, 'processed', 'hourly-new.json')), 'receipts newer than one hour must remain');
 
   const gatedRoot = tempDir();
   const gatedRawDir = path.join(gatedRoot, 'raw');
